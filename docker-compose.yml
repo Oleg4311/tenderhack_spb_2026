@@ -12,6 +12,10 @@ services:
       - LOG_LEVEL=INFO
       - PROXY_URL=${PROXY_URL:-}
       - PROXY_LIST=${PROXY_LIST:-}
+      - SEARXNG_URL=http://searxng:8080
+    depends_on:
+      searxng:
+        condition: service_started
     networks:
       - tenderhack_net
     healthcheck:
@@ -35,7 +39,19 @@ services:
     networks:
       - tenderhack_net
 
+  searxng:
+    image: searxng/searxng:latest
+    container_name: tenderhack_searxng
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_SECRET=tenderhack_secret_2026_xk92mpl
+    networks:
+      - tenderhack_net
+
 networks:
   tenderhack_net:
     driver: bridge
-

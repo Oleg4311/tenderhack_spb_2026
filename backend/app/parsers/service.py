@@ -27,6 +27,21 @@ async def _run_source(source: str, query: str, expanded: list[str], category: st
     try:
         parser = PARSERS[source]()
         result = await asyncio.wait_for(parser.search(query, region=region, limit=limit, category=category), timeout=28)
+        
+
+        # ── SearxNG fallback при блокировке ──
+        if result.status == "blocked" and source != "runet":
+            try:
+                from app.parsers.service_patch import searxng_fallback
+                fallback_result = await searxng_fallback(source, query, region, limit, category)
+                if fallback_result and fallback_result.items:
+                    result = fallback_result
+                    result.diagnostics["recovery"] = "searxng_fallback"
+            except Exception as exc:
+                logger.warning(f"[{source}] SearxNG fallback failed: {exc}")
+
+
+
         if result.status == "empty" and source != "runet":
             for variant in expanded[1:3]:
                 result = await asyncio.wait_for(parser.search(variant, region=region, limit=limit, category=category), timeout=20)
