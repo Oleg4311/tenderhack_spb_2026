@@ -15,7 +15,7 @@ services:
     networks:
       - tenderhack_net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).read()"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -38,4 +38,3 @@ services:
 networks:
   tenderhack_net:
     driver: bridge
-

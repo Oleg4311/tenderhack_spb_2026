@@ -51,24 +51,19 @@ class OzonParser:
                     if resp.blocked:
                         _blocked_reason = _blocked_reason or f"HTTP {resp.status_code}: Ozon anti-bot"
 
-            if _conn_errors == 2 and not items:
-                return SourceResult(
-                    self.source,
-                    "blocked",
-                    errorReason=_blocked_reason,
-                    diagnostics={"operatorAction": "configure PROXY_URL env variable to access Ozon"},
-                )
-
-            if not items and resp and resp.blocked:
+            # If both HTTP attempts failed with timeout/error, still try browser fallback
+            need_browser = (_conn_errors >= 2 and not items) or (resp and resp.blocked and not items)
+            if need_browser:
                 try:
                     rendered = await asyncio.wait_for(
                         fetch_rendered_html(
                             search_url,
                             referer="https://www.ozon.ru/",
-                            wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]'],
+                            warmup_url="https://www.ozon.ru/",
+                            wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]', '[class*="tile" i]'],
                             scroll_steps=2,
                         ),
-                        timeout=15,
+                        timeout=25,
                     )
                 except Exception:
                     rendered = None
@@ -95,7 +90,7 @@ class OzonParser:
                     items.extend(self._items_from_json(payload, region, category, limit - len(items)))
                 if not items and candidate_html:
                     items = self._items_from_html(candidate_html, search_url, region, category, limit)
-            elif not items and candidate_html:
+            if not items and candidate_html:
                 items = self._items_from_html(candidate_html, search_url, region, category, limit)
 
             if not items:

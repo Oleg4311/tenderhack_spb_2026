@@ -11,6 +11,15 @@ except ModuleNotFoundError:
 from app.parsers.common import ProductItem, clean_text, default_geo, normalize_price, normalize_url
 
 
+def _soup(html: str):
+    if BeautifulSoup is None:
+        return None
+    try:
+        return BeautifulSoup(html or "", "html.parser")
+    except Exception:
+        return BeautifulSoup(html or "", "html.parser")
+
+
 def _loads(text: str) -> Any:
     try:
         return json.loads(text)
@@ -45,7 +54,7 @@ def extract_jsonld_products(html: str) -> list[dict[str, Any]]:
                 if any(str(t).lower() in {"product", "offer"} for t in types):
                     out.append(node)
         return out
-    soup = BeautifulSoup(html or "", "lxml")
+    soup = _soup(html)
     out: list[dict[str, Any]] = []
     for tag in soup.find_all("script", type="application/ld+json"):
         data = _loads(tag.string or tag.get_text() or "")
@@ -60,7 +69,7 @@ def extract_jsonld_products(html: str) -> list[dict[str, Any]]:
 def extract_microdata(html: str) -> list[dict[str, Any]]:
     if BeautifulSoup is None:
         return []
-    soup = BeautifulSoup(html or "", "lxml")
+    soup = _soup(html)
     products = []
     for scope in soup.select('[itemscope][itemtype*="Product"]'):
         data: dict[str, Any] = {}
@@ -68,7 +77,15 @@ def extract_microdata(html: str) -> list[dict[str, Any]]:
             key = prop.get("itemprop")
             if not key:
                 continue
-            data[key] = prop.get("content") or prop.get("src") or prop.get("href") or prop.get_text(" ", strip=True)
+            content = prop.get("content")
+            # Some CMSes (Bitrix) embed internal IDs in content for price — prefer visible text when > 100k
+            if key == "price" and content:
+                try:
+                    if float(content) > 100_000:
+                        content = None
+                except (ValueError, TypeError):
+                    pass
+            data[key] = content or prop.get("src") or prop.get("href") or prop.get_text(" ", strip=True)
         products.append(data)
     return products
 
@@ -105,7 +122,7 @@ def extract_embedded_json(html: str) -> list[Any]:
             if data is not None:
                 out.append(data)
         return out
-    soup = BeautifulSoup(html or "", "lxml")
+    soup = _soup(html)
     out: list[Any] = []
     next_data = extract_next_data(html)
     if next_data is not None:
@@ -222,7 +239,7 @@ def extract_product_links(html: str, base_url: str) -> list[str]:
                 if url and url not in links:
                     links.append(url)
         return links[:80]
-    soup = BeautifulSoup(html or "", "lxml")
+    soup = _soup(html)
     links: list[str] = []
     for a in soup.find_all("a", href=True):
         href = a["href"]
@@ -248,7 +265,7 @@ def extract_images(html: str, base_url: str) -> list[str]:
                 if url and url not in images and not url.startswith("data:"):
                     images.append(url)
         return images[:12]
-    soup = BeautifulSoup(html or "", "lxml")
+    soup = _soup(html)
     images = []
     for tag in soup.select('meta[property="og:image"], img'):
         src = tag.get("content") or tag.get("src") or tag.get("data-src") or tag.get("data-original")
@@ -267,7 +284,7 @@ def extract_characteristics(html: str) -> dict[str, str]:
             if len(chars) >= 20:
                 break
         return chars
-    soup = BeautifulSoup(html or "", "lxml")
+    soup = _soup(html)
     chars: dict[str, str] = {}
     for data in extract_jsonld_products(html) + extract_microdata(html) + extract_embedded_json(html):
         chars.update({k: v for k, v in extract_characteristics_from_json(data, limit=50).items() if k not in chars})
@@ -291,7 +308,7 @@ def extract_characteristics(html: str) -> dict[str, str]:
 def extract_breadcrumbs(html: str) -> list[str]:
     if BeautifulSoup is None:
         return []
-    soup = BeautifulSoup(html or "", "lxml")
+    soup = _soup(html)
     crumbs = [clean_text(x.get_text(" ", strip=True)) for x in soup.select('[itemprop="itemListElement"], nav a, .breadcrumb a')]
     return [c for c in crumbs if c][:12]
 
@@ -299,17 +316,24 @@ def extract_breadcrumbs(html: str) -> list[str]:
 def extract_price(html: str) -> float:
     if BeautifulSoup is None:
         return normalize_price(html[:120_000])
-    soup = BeautifulSoup(html or "", "lxml")
+    soup = _soup(html)
     for selector in ('[itemprop="price"]', 'meta[property="product:price:amount"]', '[class*="price" i]'):
         for tag in soup.select(selector):
-            price = normalize_price(tag.get("content") or tag.get_text(" ", strip=True))
-            if price:
-                return price
+            content_val = tag.get("content") or ""
+            content_price = normalize_price(content_val) if content_val else 0
+            text_price = normalize_price(tag.get_text(" ", strip=True))
+            # Skip suspiciously large content values (Bitrix-style internal IDs in kopeks)
+            if content_price and content_price < 100_000:
+                return content_price
+            if text_price and text_price < 100_000:
+                return text_price
+            if content_price:
+                return content_price
     return normalize_price(html[:120_000])
 
 
 def extract_rating(html: str) -> tuple[float, int]:
-    text = clean_text(BeautifulSoup(html or "", "lxml").get_text(" ", strip=True)) if BeautifulSoup is not None else clean_text(html)
+    text = clean_text(_soup(html).get_text(" ", strip=True)) if BeautifulSoup is not None else clean_text(html)
     rating = 0.0
     reviews = 0
     m = re.search(r"([1-5][.,]\d)", text)
@@ -325,7 +349,7 @@ def extract_description(html: str) -> str:
     if BeautifulSoup is None:
         match = re.search(r'<meta[^>]+(?:name|property)=["\'](?:description|og:description)["\'][^>]+content=["\']([^"\']+)["\']', html or "", re.I)
         return clean_text(match.group(1))[:2000] if match else ""
-    soup = BeautifulSoup(html or "", "lxml")
+    soup = _soup(html)
     meta = soup.select_one('meta[name="description"], meta[property="og:description"]')
     if meta:
         return clean_text(meta.get("content"))[:2000]
@@ -337,7 +361,7 @@ def extract_description(html: str) -> str:
 
 
 def extract_geo(html: str) -> dict[str, Any]:
-    text = clean_text(BeautifulSoup(html or "", "lxml").get_text(" ", strip=True)) if BeautifulSoup is not None else clean_text(html)
+    text = clean_text(_soup(html).get_text(" ", strip=True)) if BeautifulSoup is not None else clean_text(html)
     geo = default_geo("")
     for data in extract_jsonld_products(html) + extract_microdata(html) + extract_embedded_json(html):
         json_geo = extract_geo_from_json(data)
@@ -398,7 +422,7 @@ def extract_product_from_html(html: str, url: str, source: str) -> ProductItem:
             break
     else:
         if BeautifulSoup is not None:
-            soup = BeautifulSoup(html or "", "lxml")
+            soup = _soup(html)
             h1 = soup.find("h1")
             title = h1.get_text(" ", strip=True) if h1 else ""
         else:

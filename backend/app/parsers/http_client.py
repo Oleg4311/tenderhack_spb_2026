@@ -70,12 +70,19 @@ def browser_headers(referer: str = "", source: str = "") -> dict[str, str]:
     return {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Accept-Encoding": "gzip, deflate, br",
         "Referer": referer or REFERERS.get(source, "https://www.google.com/"),
         "DNT": "1",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-User": "?1",
+        "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
     }
 
 
@@ -88,11 +95,18 @@ def json_headers(referer: str = "", source: str = "") -> dict[str, str]:
 class Fetcher:
     def __init__(self):
         proxy = _proxy_config()
+        http2_enabled = os.getenv("HTTPX_HTTP2", "1").lower() in {"1", "true", "yes"}
+        if http2_enabled:
+            try:
+                import h2  # noqa: F401
+            except ModuleNotFoundError:
+                logger.warning("[HTTP] HTTP/2 requested but h2 is not installed; falling back to HTTP/1.1")
+                http2_enabled = False
         kwargs: dict[str, Any] = {
             "timeout": httpx.Timeout(20.0, connect=5.0, read=12.0, write=5.0, pool=5.0),
             "follow_redirects": True,
             "headers": browser_headers(),
-            "http2": False,
+            "http2": http2_enabled,
         }
         if proxy:
             kwargs["proxy"] = proxy
@@ -142,6 +156,12 @@ class Fetcher:
                 await rate_limiter.wait(domain)
                 response = await self.client.request(method, url, headers=headers, params=params)
                 text = response.text or ""
+                # Some Russian sites claim UTF-8 but actually serve CP1251 (e.g. Bitrix CMS)
+                if "�" in text[:8000]:
+                    try:
+                        text = response.content.decode("cp1251")
+                    except Exception:
+                        pass
                 last = FetchResponse(
                     url=str(response.url),
                     status_code=response.status_code,
@@ -179,4 +199,3 @@ class Fetcher:
 
     async def __aexit__(self, *_):
         await self.close()
-

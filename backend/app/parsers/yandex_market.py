@@ -51,24 +51,19 @@ class YandexMarketParser:
                 if resp.blocked:
                     _blocked_reason = _blocked_reason or f"HTTP {resp.status_code}: Yandex Market anti-bot / VPN flag"
 
-            if _conn_errors == 2 and not items:
-                return SourceResult(
-                    self.source,
-                    "blocked",
-                    errorReason=_blocked_reason,
-                    diagnostics={"operatorAction": "configure PROXY_URL env variable to access Yandex Market"},
-                )
-
-            if resp and resp.blocked:
+            # If all HTTP attempts failed, still try browser fallback
+            need_browser = (_conn_errors >= 2 and not items) or (resp and resp.blocked and not items)
+            if need_browser:
                 try:
                     rendered = await asyncio.wait_for(
                         fetch_rendered_html(
                             search_url,
                             referer="https://market.yandex.ru/",
-                            wait_selectors=['[data-zone-name*="product" i]', "article", 'a[href*="/product"]'],
+                            warmup_url="https://market.yandex.ru/",
+                            wait_selectors=['[data-zone-name*="product" i]', "article", 'a[href*="/product"]', '[class*="Product" i]'],
                             scroll_steps=2,
                         ),
-                        timeout=15,
+                        timeout=25,
                     )
                 except Exception:
                     rendered = None

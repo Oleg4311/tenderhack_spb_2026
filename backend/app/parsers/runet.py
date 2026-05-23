@@ -1,4 +1,5 @@
 import asyncio
+import random
 import re
 from urllib.parse import quote_plus, urlparse
 from xml.etree import ElementTree
@@ -11,8 +12,7 @@ from app.parsers.http_client import Fetcher, browser_headers
 SITE_POOL = {
     "tires": ["4tochki.ru", "autoopt.ru", "shina-guide.ru", "tyres-auto.ru"],
     "office": ["foroffice.ru", "oldi.ru", "price.ru", "komus.ru"],
-    # Clothes: sites with accessible HTTP and product price data
-    "clothes": ["bonprix.ru", "kari.com", "befree.ru", "wildberries.ru"],
+    "clothes": ["zolla.com", "sportmaster.ru", "kari.com"],
 }
 
 SEARCH_PATTERNS = [
@@ -82,25 +82,17 @@ ADAPTERS = {
         "allow": ["/produkt/", "/catalog/", "/product/"],
         "seller": "bonprix",
     },
+    "zolla.com": {
+        "search": [
+            "https://zolla.com/search/?q={q}",
+            "https://zolla.com/catalog/search/?q={q}",
+        ],
+        "allow": ["/product/"],
+        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
+        "seller": "Zolla",
+    },
     "kari.com": {
         "preflight": "https://kari.com/",
-        "search": [
-            "https://kari.com/catalog/?q={q}",
-            "https://kari.com/search/?q={q}",
-        ],
-        "allow": ["/catalog/product/", "/product/"],
-        "seller": "kari",
-    },
-    "befree.ru": {
-        "preflight": "https://befree.ru/",
-        "search": [
-            "https://befree.ru/catalog/search/?q={q}",
-            "https://befree.ru/search/?q={q}",
-        ],
-        "allow": ["/catalog/", "/product/", "/item/"],
-        "seller": "befree",
-    },
-    "kari.com": {
         "search": [
             "https://kari.com/catalog/?q={q}",
             "https://kari.com/search/?q={q}",
@@ -110,30 +102,16 @@ ADAPTERS = {
         "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})"],
         "seller": "kari",
     },
-    "lamoda.ru": {
-        "search": [
-            "https://www.lamoda.ru/catalogsearch/result/?q={q}",
-            "https://www.lamoda.ru/search/?text={q}",
-        ],
-        "allow": ["/p/", "/product/"],
-        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"([A-Z][a-z]+(?:\s[A-Z][a-z]+)?) — "],
-        "seller": "Lamoda",
-    },
-    "befree.ru": {
-        "search": [
-            "https://befree.ru/catalog/search/?q={q}",
-            "https://befree.ru/search/?q={q}",
-            "https://befree.ru/?q={q}",
-        ],
-        "allow": ["/catalog/", "/product/", "/item/"],
-        "seller": "befree",
-    },
     "autoopt.ru": {
         "search": ["https://autoopt.ru/search/?q={q}", "https://autoopt.ru/catalog/?text={q}"],
         "allow": ["/catalog/", "/product/", "/item/"],
         "seller": "АвтоОпт",
     },
 }
+
+
+# Sites that always block plain HTTP — go straight to Playwright, skip the failed HTTP round-trip.
+BROWSER_FIRST_HOSTS = {"sportmaster.ru", "kari.com"}
 
 
 class RunetParser:
@@ -146,7 +124,7 @@ class RunetParser:
             tasks = [
                 asyncio.wait_for(
                     self._search_host(fetcher, host, query, region, category, per_host),
-                    timeout=16,
+                    timeout=30,
                 )
                 for host in hosts
             ]
@@ -170,7 +148,7 @@ class RunetParser:
             try:
                 await asyncio.wait_for(
                     fetcher.get_text(adapter["preflight"], source=self.source, headers=browser_headers(referer="https://www.google.com/", source=self.source), retries=0),
-                    timeout=3,
+                    timeout=5,
                 )
             except Exception:
                 pass
@@ -178,21 +156,21 @@ class RunetParser:
         patterns = adapter.get("search") or SEARCH_PATTERNS
         for pattern in patterns:
             url = pattern.format(host=host, q=q)
-            should_try_browser = False
-            try:
-                resp = await asyncio.wait_for(
-                    fetcher.get_text(url, source=self.source, headers=browser_headers(referer=base_url, source=self.source), retries=0),
-                    timeout=3,
-                )
-                if resp.blocked:
+            # Browser-first: skip the HTTP round-trip for hosts that always block it
+            should_try_browser = host in BROWSER_FIRST_HOSTS
+            html = ""
+            if not should_try_browser:
+                try:
+                    resp = await asyncio.wait_for(
+                        fetcher.get_text(url, source=self.source, headers=browser_headers(referer=base_url, source=self.source), retries=0),
+                        timeout=8,
+                    )
+                    if resp.blocked:
+                        should_try_browser = True
+                    else:
+                        html = resp.text or ""
+                except Exception:
                     should_try_browser = True
-                    html = ""
-                else:
-                    html = resp.text or ""
-            except Exception:
-                # Connection error — try browser fallback directly
-                should_try_browser = True
-                html = ""
             if should_try_browser:
                 try:
                     rendered = await asyncio.wait_for(
@@ -219,28 +197,43 @@ class RunetParser:
                 links = await asyncio.wait_for(self._discover_links_from_sitemaps(fetcher, host, query, category, limit * 3), timeout=4)
             except Exception:
                 links = []
-        for link in links[:limit]:
-            try:
-                detail = await asyncio.wait_for(
-                    fetcher.get_text(link, source=self.source, referer=base_url, retries=0),
-                    timeout=3,
-                )
-            except Exception:
-                continue
-            detail_html = detail.text
-            if detail.blocked or not detail_html:
+        for i, link in enumerate(links[:limit]):
+            if host in BROWSER_FIRST_HOSTS:
+                # Human-like pause between product page visits; first page has no delay
+                if i > 0:
+                    await asyncio.sleep(random.uniform(0.8, 2.0))
                 try:
                     rendered = await asyncio.wait_for(
                         fetch_rendered_html(link, referer=base_url, wait_selectors=["h1", ".product", ".price"], scroll_steps=1),
-                        timeout=5,
+                        timeout=8,
                     )
                 except Exception:
-                    rendered = None
-                if not rendered:
                     continue
-                if rendered.status == "blocked" or not rendered.html:
+                if not rendered or rendered.status in ("blocked", "error") or not rendered.html:
                     continue
                 detail_html = rendered.html
+            else:
+                try:
+                    detail = await asyncio.wait_for(
+                        fetcher.get_text(link, source=self.source, referer=base_url, retries=0),
+                        timeout=8,
+                    )
+                except Exception:
+                    continue
+                detail_html = detail.text
+                if detail.blocked or not detail_html:
+                    try:
+                        rendered = await asyncio.wait_for(
+                            fetch_rendered_html(link, referer=base_url, wait_selectors=["h1", ".product", ".price"], scroll_steps=1),
+                            timeout=5,
+                        )
+                    except Exception:
+                        rendered = None
+                    if not rendered:
+                        continue
+                    if rendered.status == "blocked" or not rendered.html:
+                        continue
+                    detail_html = rendered.html
             item = extract_product_from_html(detail_html, link, self.source)
             if not item.title and not item.price:
                 continue

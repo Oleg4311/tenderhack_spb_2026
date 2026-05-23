@@ -4,6 +4,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from app.parsers.common import detect_blocked_page
 from app.parsers.http_client import USER_AGENTS
@@ -14,6 +15,13 @@ _playwright = None
 _browser = None
 _lock = asyncio.Lock()
 _browser_semaphore = asyncio.Semaphore(int(os.getenv("BROWSER_CONCURRENCY", "3")))
+
+# Persistent contexts: one BrowserContext per domain keeps cookies/localStorage alive
+# between search page and product detail pages — the #1 anti-bot signal.
+_contexts: dict[str, object] = {}        # domain -> BrowserContext
+_context_browsers: dict[str, object] = {}  # domain -> browser instance (staleness check)
+_context_locks: dict[str, asyncio.Lock] = {}
+_context_warmed: set[str] = set()        # domains whose homepage was already visited
 
 # Full stealth init script — patches every known automation fingerprint
 _STEALTH_JS = """
@@ -147,7 +155,37 @@ _STEALTH_JS = """
     });
   } catch(e) {}
 
-  // 12. toString() on functions should look native
+  // 12. Canvas fingerprint noise — randomize slightly to defeat fingerprinting
+  try {
+    const _getCtx = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+      const ctx = _getCtx.call(this, type, attrs);
+      if (ctx && type === '2d') {
+        const _fillText = ctx.fillText.bind(ctx);
+        ctx.fillText = function(text, x, y, maxWidth) {
+          return maxWidth !== undefined ? _fillText(text, x, y + 0.00001, maxWidth) : _fillText(text, x, y + 0.00001);
+        };
+      }
+      return ctx;
+    };
+  } catch(e) {}
+
+  // 13. AudioContext fingerprint noise
+  try {
+    const _createBuffer = AudioContext.prototype.createBuffer;
+    AudioContext.prototype.createBuffer = function(numChan, length, rate) {
+      const buf = _createBuffer.call(this, numChan, length, rate);
+      for (let c = 0; c < buf.numberOfChannels; c++) {
+        const data = buf.getChannelData(c);
+        for (let i = 0; i < data.length; i++) {
+          data[i] += (Math.random() * 2 - 1) * 1e-7;
+        }
+      }
+      return buf;
+    };
+  } catch(e) {}
+
+  // 14. toString() on functions should look native
   const _nativeToString = Function.prototype.toString;
   const _patchedFuncs = new WeakMap();
   Function.prototype.toString = function() {
@@ -172,18 +210,19 @@ async def get_browser():
     async with _lock:
         if _browser and _browser.is_connected():
             return _browser
-        from playwright.async_api import async_playwright
+        try:
+            from playwright.async_api import async_playwright
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("Playwright is not installed in this runtime image") from exc
         _playwright = await async_playwright().start()
         _browser = await _playwright.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
-                # Remove all traces of automation
                 "--disable-blink-features=AutomationControlled",
                 "--disable-automation",
                 "--exclude-switches=enable-automation",
-                # Normal browser behaviour
                 "--disable-infobars",
                 "--disable-notifications",
                 "--disable-popup-blocking",
@@ -192,14 +231,11 @@ async def get_browser():
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--lang=ru-RU",
-                # GPU/rendering (headless mode hints)
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
                 "--disable-software-rasterizer",
-                # Network
                 "--enable-features=NetworkService,NetworkServiceInProcess",
                 "--disable-features=IsolateOrigins,site-per-process",
-                # Window
                 "--window-size=1366,768",
                 "--start-maximized",
             ],
@@ -215,6 +251,54 @@ def _browser_proxy() -> dict | None:
     return {"server": proxy} if proxy else None
 
 
+async def _get_context(domain: str):
+    """Get or create a persistent BrowserContext for domain.
+
+    Cookies and localStorage survive across calls, so the site sees a returning
+    user instead of a new bot fingerprint on every request.
+    """
+    if domain not in _context_locks:
+        _context_locks[domain] = asyncio.Lock()
+    async with _context_locks[domain]:
+        browser = await get_browser()
+        # Reuse existing context if the browser hasn't restarted
+        if domain in _contexts and _context_browsers.get(domain) is browser:
+            return _contexts[domain]
+        proxy = _browser_proxy()
+        ua = random.choice(USER_AGENTS)
+        context_kwargs: dict = {
+            "user_agent": ua,
+            "locale": "ru-RU",
+            "timezone_id": "Europe/Moscow",
+            "viewport": {"width": 1366, "height": 768},
+            "screen": {"width": 1366, "height": 768},
+            "color_scheme": "light",
+            "java_script_enabled": True,
+            "permissions": ["geolocation"],
+            "extra_http_headers": {
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "none",
+                "sec-fetch-user": "?1",
+                "upgrade-insecure-requests": "1",
+            },
+        }
+        if proxy:
+            context_kwargs["proxy"] = proxy
+        context = await browser.new_context(**context_kwargs)
+        context.set_default_timeout(10_000)
+        context.set_default_navigation_timeout(20_000)
+        await context.add_init_script(_STEALTH_JS)
+        _contexts[domain] = context
+        _context_browsers[domain] = browser
+        return context
+
+
 def _looks_like_product_payload(data: dict | list) -> bool:
     text = json.dumps(data, ensure_ascii=False)[:250_000].lower()
     markers = ("product", "sku", "offer", "price", "товар", "model", "wareid", "cardprice", "nm_id", "market")
@@ -225,55 +309,41 @@ async def fetch_rendered_html(
     url: str,
     *,
     referer: str = "",
+    warmup_url: str = "",
     region: str = "",
     wait_selectors: list[str] | None = None,
     scroll_steps: int = 3,
 ) -> BrowserResult:
     async with _browser_semaphore:
-        browser = await get_browser()
-        context = None
+        domain = urlparse(url).netloc
         page = None
         on_response = None
         payloads: list[dict | list] = []
         product_payloads: list[dict | list] = []
         try:
-            proxy = _browser_proxy()
-            ua = random.choice(USER_AGENTS)
-            context_kwargs = {
-                "user_agent": ua,
-                "locale": "ru-RU",
-                "timezone_id": "Europe/Moscow",
-                "viewport": {"width": 1366, "height": 768},
-                "screen": {"width": 1366, "height": 768},
-                "color_scheme": "light",
-                "java_script_enabled": True,
-                "permissions": ["geolocation"],
-                "extra_http_headers": {
-                    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
-                    "sec-fetch-dest": "document",
-                    "sec-fetch-mode": "navigate",
-                    "sec-fetch-site": "none",
-                    "sec-fetch-user": "?1",
-                    "upgrade-insecure-requests": "1",
-                    **({"Referer": referer} if referer else {}),
-                },
-            }
-            if proxy:
-                context_kwargs["proxy"] = proxy
-            context = await browser.new_context(**context_kwargs)
-            context.set_default_timeout(10_000)
-            context.set_default_navigation_timeout(20_000)
-            await context.add_init_script(_STEALTH_JS)
-
+            context = await _get_context(domain)
             page = await context.new_page()
+
+            # Referer changes per-call so set it at page level (overrides context header)
+            if referer:
+                await page.set_extra_http_headers({"Referer": referer})
+
+            # Warmup: visit homepage once per domain lifetime so cookies/session are established.
+            # With persistent context this only runs on the very first request to each domain.
+            if warmup_url and domain not in _context_warmed:
+                _context_warmed.add(domain)
+                try:
+                    await page.goto(warmup_url, wait_until="commit", timeout=7_000)
+                    await page.wait_for_timeout(random.randint(800, 1500))
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=3_000)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
             async def route_handler(route):
                 try:
-                    # Block images and media only — keep fonts/CSS (anti-bot checks resource loading)
                     if route.request.resource_type in {"image", "media"}:
                         await route.abort()
                     else:
@@ -298,10 +368,15 @@ async def fetch_rendered_html(
 
             page.on("response", on_response)
 
-            # Navigate to the page
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+            try:
+                response = await page.goto(url, wait_until="commit", timeout=20_000)
+            except Exception as nav_exc:
+                err_lower = str(nav_exc).lower()
+                if any(k in err_lower for k in ("err_aborted", "aborted", "frame was detached", "net::")):
+                    response = None
+                else:
+                    raise
 
-            # Human-like: move mouse to a random position after load
             try:
                 await page.mouse.move(
                     random.randint(200, 800),
@@ -311,7 +386,6 @@ async def fetch_rendered_html(
             except Exception:
                 pass
 
-            # Wait for product-related selectors
             selectors = wait_selectors or [
                 'a[href*="/product/"]',
                 'a[href*="/catalog/"]',
@@ -328,7 +402,6 @@ async def fetch_rendered_html(
                 except Exception:
                     continue
 
-            # Scroll with human-like timing
             for i in range(max(0, scroll_steps)):
                 try:
                     scroll_amount = random.randint(800, 1400)
@@ -337,17 +410,18 @@ async def fetch_rendered_html(
                 except Exception:
                     break
 
-            # Give XHR requests time to complete after scroll
             try:
                 await page.wait_for_load_state("networkidle", timeout=4_000)
             except Exception:
                 pass
 
-            html = await page.content()
+            try:
+                html = await page.content()
+            except Exception:
+                html = ""
             status_code = response.status if response else 0
 
             if detect_blocked_page(html, status_code):
-                # Even on a challenge page, we might have captured XHR product data
                 if product_payloads:
                     return BrowserResult(
                         html=html,
@@ -356,7 +430,6 @@ async def fetch_rendered_html(
                         status="ok",
                         errorReason="challenge page but XHR product payloads captured",
                     )
-                # Wait extra time for JS challenge to resolve and retry content
                 try:
                     await page.wait_for_timeout(3_000)
                     await page.wait_for_load_state("networkidle", timeout=4_000)
@@ -403,11 +476,7 @@ async def fetch_rendered_html(
                     await page.close()
                 except Exception:
                     pass
-            if context:
-                try:
-                    await context.close()
-                except Exception:
-                    pass
+            # Context is NOT closed here — it persists to keep cookies/session alive
 
 
 async def new_page(context_options: dict | None = None):
@@ -418,6 +487,14 @@ async def new_page(context_options: dict | None = None):
 
 async def close_browser() -> None:
     global _playwright, _browser
+    for ctx in list(_contexts.values()):
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+    _contexts.clear()
+    _context_browsers.clear()
+    _context_warmed.clear()
     if _browser:
         await _browser.close()
         _browser = None

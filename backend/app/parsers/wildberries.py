@@ -3,7 +3,7 @@ from urllib.parse import quote_plus
 
 from app.parsers.browser import fetch_rendered_html
 from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price
-from app.parsers.extractors import extract_characteristics_from_json, extract_product_from_html, extract_product_links
+from app.parsers.extractors import extract_characteristics_from_json, extract_embedded_json, extract_product_from_html, extract_product_links
 from app.parsers.http_client import Fetcher, json_headers
 
 REGION_DEST = {"москва": "-1257786", "санкт-петербург": "-1275499", "спб": "-1275499"}
@@ -63,7 +63,7 @@ class WildberriesParser:
                 try:
                     resp = await asyncio.wait_for(
                         fetcher.get_json(endpoint, source=self.source, headers=json_headers(source=self.source), params=params, retries=0),
-                        timeout=4,
+                        timeout=2.5,
                     )
                 except asyncio.TimeoutError:
                     _conn_errors += 1
@@ -92,14 +92,17 @@ class WildberriesParser:
                 items[idx] = merge_product_data(item, detail)
 
         if not items:
+            search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={quote_plus(query)}"
             try:
                 rendered = await asyncio.wait_for(
                     fetch_rendered_html(
-                        f"https://www.wildberries.ru/catalog/0/search.aspx?search={quote_plus(query)}",
+                        search_url,
                         referer="https://www.wildberries.ru/",
+                        warmup_url="https://www.wildberries.ru/",
+                        wait_selectors=['a[href*="/catalog/"]', '[data-nm-id]', '.product-card', 'article'],
                         scroll_steps=2,
                     ),
-                    timeout=15,
+                    timeout=25,
                 )
             except asyncio.TimeoutError:
                 rendered = None
@@ -118,23 +121,68 @@ class WildberriesParser:
                         "triedEndpoints": SEARCH_ENDPOINTS[:2],
                     } if blocked_reason else {},
                 )
-            if rendered.status == "blocked":
+            # Extract from XHR-captured WB API payloads (most reliable path)
+            for payload in rendered.product_payloads or []:
+                wb_products = ((payload or {}).get("data") or {}).get("products") or []
+                if not wb_products and isinstance(payload, list):
+                    wb_products = payload
+                for raw in wb_products[:limit]:
+                    item = self._from_search_product(raw, region, category)
+                    if item:
+                        items.append(item)
+                if items:
+                    break
+
+            if not items and rendered.status == "blocked" and not rendered.product_payloads:
                 return SourceResult(
                     self.source,
                     "blocked",
                     errorReason=rendered.errorReason or blocked_reason,
                     diagnostics={"operatorAction": "configure PROXY_URL env variable"},
                 )
-            links = extract_product_links(rendered.html, "https://www.wildberries.ru/")
-            async with Fetcher() as fetcher:
-                for link in links[:limit]:
-                    resp = await fetcher.get_text(link, source=self.source, referer="https://www.wildberries.ru/", retries=0)
-                    if resp.text:
-                        product = extract_product_from_html(resp.text, link, self.source)
-                        product.region = region
-                        product.geo = default_geo(region)
-                        product.category = category
-                        items.append(product)
+
+            # Also try extracting from embedded JS data (__NUXT__, __INITIAL_STATE__, etc.)
+            if not items and rendered.html:
+                for data in extract_embedded_json(rendered.html):
+                    wb_products = ((data or {}).get("data") or {}).get("products") or []
+                    if not wb_products:
+                        # Try walking nested structure
+                        def _find_products(node, depth=0):
+                            if depth > 6:
+                                return []
+                            if isinstance(node, dict):
+                                prods = node.get("products") or node.get("catalog") or []
+                                if isinstance(prods, list) and prods and isinstance(prods[0], dict) and prods[0].get("id"):
+                                    return prods
+                                for v in node.values():
+                                    result = _find_products(v, depth + 1)
+                                    if result:
+                                        return result
+                            elif isinstance(node, list):
+                                for item in node[:5]:
+                                    result = _find_products(item, depth + 1)
+                                    if result:
+                                        return result
+                            return []
+                        wb_products = _find_products(data)
+                    for raw in wb_products[:limit]:
+                        item = self._from_search_product(raw, region, category)
+                        if item:
+                            items.append(item)
+                    if items:
+                        break
+
+            if not items:
+                links = extract_product_links(rendered.html or "", "https://www.wildberries.ru/")
+                async with Fetcher() as fetcher:
+                    for link in links[:limit]:
+                        resp = await fetcher.get_text(link, source=self.source, referer="https://www.wildberries.ru/", retries=0)
+                        if resp.text:
+                            product = extract_product_from_html(resp.text, link, self.source)
+                            product.region = region
+                            product.geo = default_geo(region)
+                            product.category = category
+                            items.append(product)
         status = "ok" if items else ("blocked" if blocked_reason else "empty")
         return SourceResult(self.source, status, len(items), blocked_reason if not items else "", items[:limit])
 

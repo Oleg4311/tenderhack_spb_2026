@@ -1,164 +1,397 @@
-# PriceHunt — Интеллектуальный сервис поиска цен
+# PriceHunt TenderHack 2026
 
-> Хакатон «Tender Hack — Санкт-Петербург 2026»
+Интеллектуальный runtime-сервис поиска цен в открытых источниках для Tender Hack SPB 2026.
 
-## Соответствие критериям оценки
+Проект ищет товары по запросу, категории и региону, собирает данные из Wildberries, Ozon, Яндекс Маркета и открытых сайтов Рунета, нормализует результат и отдаёт единый JSON для frontend.
 
-| Критерий PDF | Реализация |
-|-------------|-----------|
-| **40 баллов** — работоспособный прототип | `docker compose up --build` → сервис работает |
-| **25 баллов** — WB + Ozon + YM: фото, название, характеристики, цена, ссылка | Playwright-парсеры с многоуровневым fallback |
-| **25 баллов** — бесплатный поиск в Рунете, нефиксированный 4-й источник | Собственный crawler + inverted index + собственное ранжирование |
-| **10 баллов** — синонимы, опечатки, регион, UX, обоснование rate limiting | pymorphy3 + rapidfuzz + SYNONYM_MAP |
+## Что Реализовано
 
-## Запуск
+- Runtime-парсинг без БД, авторизации и постоянного кэша.
+- Источники:
+  - Wildberries
+  - Ozon
+  - Яндекс Маркет
+  - Рунет-пул по категориям
+- Категории:
+  - `clothes`
+  - `tires`
+  - `office`
+- Pipeline:
+  - нормализация запроса;
+  - расширение синонимами;
+  - параллельный запуск источников;
+  - HTTP/API/HTML parsing;
+  - JSON-LD, microdata, embedded JSON;
+  - Playwright fallback;
+  - XHR/fetch JSON capture;
+  - detail-page enrichment;
+  - sitemap fallback для Рунета;
+  - grouped response.
+
+## Архитектура
+
+```text
+frontend React/Nginx :3000
+        |
+        | /api/*
+        v
+backend FastAPI :8000
+        |
+        v
+backend/app/parsers/
+  common.py             models, scoring, utilities
+  http_client.py        httpx client, retry, proxy, rate limit
+  browser.py            Playwright fallback + XHR capture
+  extractors.py         JSON-LD/microdata/HTML/geo extraction
+  query_normalizer.py   typo/layout/synonym/tire normalization
+  wildberries.py
+  ozon.py
+  yandex_market.py
+  runet.py
+  service.py            orchestrator
+```
+
+## Запуск Через Docker
 
 ```bash
 docker compose up --build
 ```
 
-| Сервис | URL |
-|--------|-----|
-| Веб-интерфейс | http://localhost:3000 |
-| API Swagger | http://localhost:8000/docs |
-| Health check | http://localhost:8000/api/health |
+После запуска:
 
-Сборка: ~7–10 мин (Playwright Chromium ~170 MB скачивается один раз).  
-Повторный `docker compose up`: ~20 сек.
+| Сервис         | URL                                      |
+| -------------- | ---------------------------------------- |
+| Frontend       | http://localhost:3000                    |
+| Backend API    | http://localhost:8000                    |
+| Swagger        | http://localhost:8000/docs               |
+| Health         | http://localhost:8000/api/health         |
+| Parsers health | http://localhost:8000/api/parsers/health |
+| Parsers smoke  | http://localhost:8000/api/parsers/smoke  |
 
-## Архитектура
+Если Docker показывает старые volumes/containers:
 
-```
-Пользователь (браузер)
-       │ HTTP
-       ▼
-React SPA (Nginx :3000)
-       │ /api/*
-       ▼
-Query Orchestrator (FastAPI search.py)
-  ┌── NLP Layer ─────────────────────────────────────────────┐
-  │  pymorphy3: нормализация форм слов                       │
-  │  rapidfuzz: исправление опечаток (Левенштейн, порог 82%) │
-  │  SYNONYM_MAP: резина→шины, лаптоп→ноутбук               │
-  │  Нормализация шин: 205/55r16 → шины 205/55 R16           │
-  └──────────────────────────────────────────────────────────┘
-       │ asyncio.gather() — параллельный запуск
-       ├─ Wildberries: извлечение из открытых JSON-структур страниц
-       ├─ Ozon:        Playwright Chromium → реальный DOM → BS4
-       ├─ Яндекс Маркет: Playwright Chromium → __NEXT_DATA__ → BS4
-       └─ Рунет:      собственный crawler → собственный index → ранжирование
-       │
-       ▼
-  Дедупликация + entity matching (нормализация title)
-  Лексическое ранжирование (token overlap + quality score)
-  Группировка по источникам
-       │
-       ▼
-JSON-ответ → React UI
+```bash
+docker compose down -v --remove-orphans
+docker compose up --build
 ```
 
-## Wildberries — почему используем открытые JSON-структуры
+## Почему Docker Может Долго Собираться
 
-Wildberries предоставляет браузеру структурированный JSON при поиске товаров.  
-Мы парсим эти же данные программно — это эквивалентно HTML-парсингу, только структурированнее.  
-**Это не «API с ключом»** — ни регистрации, ни токенов, ни платы. Точно так же, как парсинг `<script type="application/json">` на Ozon.
+Обычный `backend/Dockerfile` теперь использует лёгкий `python:3.12-slim`, `requirements.runtime.txt` и не скачивает Chromium. Это быстрый режим для демо и разработки: HTTP/API/HTML/JSON-LD/sitemap парсеры работают, а Playwright fallback будет пропущен, если браузер недоступен в контейнере.
 
-## 4-й источник (Рунет) — собственный поисковый движок
+Полный browser-режим лежит отдельно:
 
-Реализован полностью командой. **Не используется** ни один готовый search engine (Elasticsearch, Meilisearch, Typesense и др.).
-
-### Компоненты:
-
-**Crawler** (`app/crawler/`):
-- Async-обход реальных российских интернет-магазинов
-- Начинает с seed-страниц, следует по ссылкам → обнаруживает новые страницы и домены
-- robots.txt, rate limiting per domain, user-agent rotation, exponential backoff
-
-**Extractor** (`app/crawler/extractor.py`):
-- JSON-LD schema.org → microdata → OpenGraph → HTML эвристики
-- Нормализация цен: «34 990 ₽», «34990,00», «34.990»
-
-**Собственный инвертированный индекс** (`app/search_index/`):
-- Хранилище: SQLite (встроен в Python, нет внешних сервисов)
-- FTS5 — механизм полнотекстового поиска: токенизация, инвертированный индекс, BM25-подобное ранжирование
-- Результат: поиск по всем накопленным страницам без обращения к интернету
-
-**Фоновая индексация** (`app/crawler/background.py`):
-- При старте backend запускается как `asyncio.create_task`
-- Предварительно обходит seed-сайты по всем 3 категориям
-- Каждые 2 часа обновляет индекс
-- К моменту первого пользовательского запроса в индексе уже есть данные
-
-### Почему источник нефиксированный:
-
-Crawler не ограничен seed-списком — он следует по ссылкам с найденных страниц, обнаруживая новые магазины. Разные запросы → разные страницы в выдаче (befree.ru для одежды, 4tochki.ru для шин, regard.ru для оргтехники).
-
-## Query Orchestrator (search.py)
-
-Единый слой, который координирует весь pipeline:
-
-1. Принимает запрос от пользователя
-2. NLP-обработка (нормализация → опечатки → синонимы → категория)
-3. Проверка TTL-кэша (20 мин, ключ = query + region)
-4. Параллельный запуск 4 парсеров через `asyncio.gather()`
-5. Каждый парсер изолирован: timeout + retry + graceful fallback
-6. Дедупликация по URL и нормализованному title+price
-7. Лексическое ранжирование (token overlap + quality score)
-8. Группировка по источникам + price_min/max/avg
-9. Кэширование ответа
-
-## Ранжирование (без нейросетей)
-
-Собственная реализация лексического scoring:
-
-```
-score = (|tokens(query) ∩ tokens(item)| / |tokens(query)|) × 0.75
-      + quality_adjustment(item)
-
-quality_adjustment:
-  +0.12  цена присутствует
-  +0.05  изображение присутствует
-  +0.02  за каждую характеристику (макс 5)
-  -0.10  цена отсутствует
-  -0.20  название < 8 символов (мусор)
+```bash
+docker compose build backend --build-arg BUILDKIT_INLINE_CACHE=1
 ```
 
-Дедупликация + entity matching: нормализация title (`_normalize_title`) убирает дубли типа «HP LaserJet M111w» = «HP M111W».
+Если нужен Chromium внутри backend-контейнера, используйте `backend/Dockerfile.playwright`. Он основан на `mcr.microsoft.com/playwright/python`, но этот base image очень большой: один слой около 700+ MB. На медленном канале первый pull может занимать 5-15 минут. После кеширования повторные сборки быстрее.
 
-## NLP (без внешних API)
+Для переключения compose на полный browser-режим поменяйте в `docker-compose.yml`:
 
-- `pymorphy3` (~15 MB) — лемматизация: «ноутбуки» → «ноутбук»
-- `rapidfuzz` (~1 MB) — опечатки: «нотбук» → «ноутбук», порог 82%
-- Нормализация типоразмеров: `205/55r16` → `шины 205/55 R16`
-- SYNONYM_MAP: `резина` → `{шины, покрышки}`, `мфу` → `{принтер, сканер}`
+```yaml
+dockerfile: Dockerfile.playwright
+```
 
-## Обоснование rate limiting
+Если `pip install` всё равно долгий, проверьте, что compose использует `backend/Dockerfile`, а не `Dockerfile.playwright`. Быстрый runtime-файл не ставит `pymorphy3`, `trafilatura`, `rapidfuzz`, `playwright` и legacy crawler-зависимости.
 
-| Источник | Задержка | Механизм |
-|---------|---------|---------|
-| Wildberries | нет (открытый JSON) | стабильный endpoint |
-| Ozon | 1.5–3 сек + Playwright | рандомизация, UA rotation |
-| Яндекс Маркет | 2–4 сек + Playwright | Cookie с регионом, рандомизация |
-| Рунет crawler | 1.5–4 сек/домен | per-domain semaphore, backoff 2^n |
+## Переменные Окружения
 
-## BPMN
+Поддерживаются легальные прокси для HTTP и Playwright:
 
-- Диаграмма: [docs/bpmn/price-search-process.mmd](docs/bpmn/price-search-process.mmd)
-- Описание: [docs/bpmn/price-search-process.md](docs/bpmn/price-search-process.md)
-- Экспорт PNG: открыть .mmd на [mermaid.live](https://mermaid.live/) → Actions → Export PNG
+```env
+PROXY_URL=http://user:pass@host:port
+PROXY_LIST=http://user:pass@host1:port,http://user:pass@host2:port
+BROWSER_CONCURRENCY=2
+```
 
-## Сценарии демонстрации
+В `docker-compose.yml` уже проброшены:
 
-Файл: [docs/demo_cases.md](docs/demo_cases.md)
+```yaml
+PROXY_URL
+PROXY_LIST
+```
 
-Ключевые:
-- `нотбук` → CorrectionBanner: «Исправлено: ноутбук»
-- `205/55r16` → нормализовано: «шины 205/55 R16», category=tires
-- `зимняя резина` → синоним: «зимние шины»
-- `ноутбук lenovo` → все 4 источника, relevance_score для каждого товара
+`BROWSER_CONCURRENCY` можно добавить при необходимости.
+
+## API
+
+### POST `/api/search`
+
+Request:
+
+```json
+{
+  "query": "шины 205 55 r16",
+  "category": "tires",
+  "region": "Москва",
+  "limit": 10
+}
+```
+
+Response:
+
+```json
+{
+  "query": "шины 205 55 r16",
+  "normalizedQuery": "шины 205/55 R16",
+  "expandedQueries": [],
+  "region": "Москва",
+  "category": "tires",
+  "groups": {
+    "wildberries": {
+      "status": "ok",
+      "count": 3,
+      "errorReason": "",
+      "diagnostics": {},
+      "items": []
+    },
+    "ozon": {
+      "status": "blocked",
+      "count": 0,
+      "errorReason": "Ozon anti-bot or CAPTCHA",
+      "diagnostics": {},
+      "items": []
+    },
+    "yandex_market": {},
+    "runet": {}
+  },
+  "summary": {
+    "totalFound": 0,
+    "minPrice": 0,
+    "maxPrice": 0,
+    "sourcesUsed": []
+  }
+}
+```
+
+Статусы источников:
+
+- `ok` - товары найдены;
+- `empty` - источник доступен, но товары не извлечены;
+- `blocked` - источник ограничил доступ/CAPTCHA/anti-bot;
+- `error` - ошибка или timeout источника.
+
+### GET `/api/parsers/health`
+
+Показывает состояние последнего запуска:
+
+```json
+{
+  "sources": [
+    {
+      "source": "wildberries",
+      "status": "ok",
+      "lastError": "",
+      "lastLatencyMs": 1200,
+      "lastItemsCount": 10
+    }
+  ]
+}
+```
+
+### GET `/api/parsers/smoke`
+
+Короткая live-проверка источников с `limit=2`:
+
+```bash
+curl "http://localhost:8000/api/parsers/smoke?q=шины%20205%2055%20r16&category=tires&region=Москва"
+```
+
+## Формат Товара
+
+Каждый item возвращается в единой структуре:
+
+```json
+{
+  "source": "wildberries",
+  "sourceType": "marketplace",
+  "realSourceHost": "wildberries.ru",
+  "title": "",
+  "brand": "",
+  "model": "",
+  "sku": "",
+  "productId": "",
+  "category": "",
+  "breadcrumbs": [],
+  "price": 0,
+  "oldPrice": 0,
+  "discountPercent": 0,
+  "currency": "RUB",
+  "availability": "",
+  "seller": "",
+  "rating": 0,
+  "reviewsCount": 0,
+  "images": [],
+  "mainImage": "",
+  "url": "",
+  "characteristics": {},
+  "description": "",
+  "deliveryInfo": "",
+  "region": "Москва",
+  "geo": {
+    "requestedRegion": "Москва",
+    "detectedRegion": "",
+    "city": "",
+    "deliveryRegion": "",
+    "storeAddress": "",
+    "pickupAddress": "",
+    "warehouse": "",
+    "latitude": null,
+    "longitude": null
+  },
+  "relevanceScore": 0,
+  "relevanceDetails": {},
+  "completenessScore": 0,
+  "collectedAt": ""
+}
+```
+
+`characteristics` не фиксируется жёсткой схемой. Для каждого товара возвращается тот набор характеристик, который удалось извлечь именно из его карточки/JSON/detail page.
+
+## Источники И Fallback
+
+### Wildberries
+
+- public search endpoints `search.wb.ru`;
+- nmId/productId extraction;
+- card/detail endpoint;
+- basket `card.json`;
+- image URL generation;
+- Playwright fallback.
+
+### Ozon
+
+- composer/page JSON попытки;
+- HTML search;
+- embedded JSON;
+- Playwright rendered HTML;
+- XHR/fetch JSON capture;
+- product links + detail enrichment.
+
+Если Ozon возвращает anti-bot/CAPTCHA и товарные XHR не пойманы, группа получает `status="blocked"`.
+
+### Яндекс Маркет
+
+- HTML search;
+- embedded JSON / initial state;
+- Playwright fallback;
+- XHR/fetch JSON capture;
+- product links + detail enrichment.
+
+Если Маркет ограничивает доступ и товарные XHR не пойманы, группа получает `status="blocked"`.
+
+### Рунет
+
+Пул по категориям:
+
+- tires: `4tochki.ru`, `autoopt.ru`, `shina-guide.ru`, `tyres-auto.ru`
+- office: `foroffice.ru`, `oldi.ru`, `price.ru`, `officemag.ru`
+- clothes: `1click.ru`, `bonprix.ru`, `kari.com`, `sneakerhead.ru`
+
+Fallback:
+
+- host-specific search URL;
+- generic search URL;
+- rendered HTML;
+- product links;
+- detail page;
+- JSON-LD/microdata/embedded JSON;
+- robots.txt sitemap discovery;
+- sitemap.xml / sitemap_index.xml;
+- host-specific enrichment для `4tochki.ru`, `foroffice.ru`, `oldi.ru`, `price.ru`.
+
+## Нормализация Запроса
+
+Локально, без внешних API:
+
+- исправление частых опечаток;
+- нормализация раскладки;
+- удаление мусора;
+- синонимы;
+- нормализация шин.
+
+Примеры:
+
+- `резина` -> `шины`
+- `покрышки` -> `шины`
+- `мфу` -> `многофункциональное устройство`
+- `орг техника` -> `оргтехника`
+- `принтер лазерный` -> `лазерный принтер`
+- `кросовки` -> `кроссовки`
+- `205 55 r16` -> `205/55 R16`
+
+## Релевантность
+
+Внешние LLM и тяжёлые ML-модели не используются.
+
+Локальный скоринг учитывает:
+
+- title;
+- brand/model/sku/productId;
+- breadcrumbs;
+- seller;
+- description;
+- deliveryInfo;
+- все индивидуальные `characteristics`;
+- token match;
+- title boost;
+- char n-gram similarity;
+- числовые совпадения вроде `205/55 R16`.
+
+Дополнительно у товара есть:
+
+- `relevanceScore`;
+- `relevanceDetails`;
+- `completenessScore`.
 
 ## Ограничения
 
-- Ozon и ЯМ требуют Playwright Chromium — первый поисковый запрос инициализирует браузер (~3 сек)
-- Рунет crawler: первый запрос делает live-crawl (10–20 сек), последующие — из индекса (< 1 сек)
-- Сайты меняют HTML-структуру → парсеры используют многоуровневый fallback
+Проект не использует:
+
+- БД;
+- постоянный кэш;
+- авторизацию;
+- внешние LLM API;
+- Google/Bing/Yandex Search API;
+- low-code/no-code.
+
+CAPTCHA solving, обход авторизации, чужие cookies/tokens и агрессивный spam scraping не реализованы. Если источник жёстко закрывает доступ, API возвращает `status="blocked"` и diagnostics, а остальные источники продолжают работу.
+
+## Локальный Запуск Без Docker
+
+Backend:
+
+```bash
+cd backend
+pip install -r requirements.txt
+playwright install chromium
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+## Проверка
+
+```bash
+curl -X POST http://localhost:8000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"шины 205 55 r16","category":"tires","region":"Москва","limit":10}'
+
+curl -X POST http://localhost:8000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"лазерный принтер canon","category":"office","region":"Москва","limit":10}'
+
+curl -X POST http://localhost:8000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"мужская футболка хлопок","category":"clothes","region":"Москва","limit":10}'
+
+curl http://localhost:8000/api/parsers/health
+curl "http://localhost:8000/api/parsers/smoke?q=шапка&category=clothes&region=Москва"
+```
