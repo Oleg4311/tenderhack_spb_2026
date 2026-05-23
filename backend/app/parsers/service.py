@@ -30,18 +30,19 @@ async def _run_source(source: str, query: str, expanded: list[str], category: st
         parser = PARSERS[source]()
         result = await asyncio.wait_for(parser.search(query, region=region, limit=limit, category=category), timeout=28)
 
-        # ── SearxNG fallback при блокировке ──
-        if result.status == "blocked" and source != "runet":
+        # ── SearxNG fallback при блокировке ИЛИ ошибке ──
+        if result.status in ("blocked", "error", "empty") and source != "runet" and not result.items:
             try:
                 from app.parsers.service_patch import searxng_fallback
                 fallback_result = await searxng_fallback(source, query, region, limit, category)
                 if fallback_result and fallback_result.items:
                     result = fallback_result
                     result.diagnostics["recovery"] = "searxng_fallback"
+                    logger.info(f"[{source}] SearxNG fallback recovered {len(result.items)} items")
             except Exception as exc:
                 logger.warning(f"[{source}] SearxNG fallback failed: {exc}")
 
-        if result.status == "empty" and source != "runet":
+        if result.status == "empty" and source != "runet" and not result.items:
             for variant in expanded[1:3]:
                 result = await asyncio.wait_for(parser.search(variant, region=region, limit=limit, category=category), timeout=20)
                 if result.items or result.status == "blocked":
@@ -56,6 +57,16 @@ async def _run_source(source: str, query: str, expanded: list[str], category: st
         }
         return result
     except asyncio.TimeoutError:
+        # ── SearxNG fallback при timeout ──
+        logger.warning(f"[{source}] parser timeout, trying SearxNG fallback")
+        try:
+            from app.parsers.service_patch import searxng_fallback
+            fallback_result = await searxng_fallback(source, query, region, limit, category)
+            if fallback_result and fallback_result.items:
+                HEALTH[source] = {"source": source, "status": "ok", "lastError": "recovered via searxng", "lastLatencyMs": int((time.perf_counter() - started) * 1000), "lastItemsCount": len(fallback_result.items)}
+                return fallback_result
+        except Exception as exc:
+            logger.warning(f"[{source}] SearxNG fallback after timeout failed: {exc}")
         HEALTH[source] = {"source": source, "status": "error", "lastError": "source timeout > 20s", "lastLatencyMs": int((time.perf_counter() - started) * 1000), "lastItemsCount": 0}
         return SourceResult(source, "error", errorReason="source timeout > 20s")
     except Exception as exc:
@@ -89,7 +100,7 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
         source: asyncio.create_task(_run_source(source, normalized, expanded, category, region, limit))
         for source in SOURCE_KEYS
     }
-    done, pending = await asyncio.wait(tasks.values(), timeout=38)
+    done, pending = await asyncio.wait(tasks.values(), timeout=90)
     for task in pending:
         task.cancel()
     if pending:
@@ -101,7 +112,7 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
             value = task.result()
             raw_by_source[source] = value if isinstance(value, SourceResult) else SourceResult(source, "error", errorReason=str(value))
         else:
-            raw_by_source[source] = SourceResult(source, "error", errorReason="global timeout > 30s")
+            raw_by_source[source] = SourceResult(source, "error", errorReason="global timeout > 90s")
     raw = [raw_by_source[source] for source in SOURCE_KEYS]
 
     groups = {}

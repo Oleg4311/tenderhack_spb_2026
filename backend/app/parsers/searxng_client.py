@@ -26,42 +26,39 @@ async def searxng_search(
     *,
     site_filter: str = "",
     limit: int = 15,
-    timeout: float = 8.0,
+    timeout: float = 30.0,
 ) -> list[dict]:
     """
     Поиск через SearxNG. Возвращает список {url, title, content}.
-    
-    Args:
-        query: Поисковый запрос
-        site_filter: Ограничить домен (e.g. "ozon.ru")
-        limit: Максимум результатов
-        timeout: Таймаут запроса
     """
     search_query = f"site:{site_filter} {query}" if site_filter else query
-    
+
     params = {
         "q": search_query,
         "format": "json",
         "language": "ru",
         "pageno": 1,
     }
-    
+
     url = f"{SEARXNG_URL}/search"
-    
+
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(url, params=params)
             if resp.status_code != 200:
                 logger.warning(f"[SearxNG] HTTP {resp.status_code}")
                 return []
-            
+
             data = resp.json()
             results = data.get("results", [])[:limit]
-            
-            logger.info(f"[SearxNG] '{search_query}' → {len(results)} results")
+
+            logger.info(f"[SearxNG] '{search_query}' -> {len(results)} results")
             return results
     except httpx.ConnectError:
         logger.warning("[SearxNG] Connection refused — is SearxNG container running?")
+        return []
+    except httpx.ReadTimeout:
+        logger.warning(f"[SearxNG] Read timeout ({timeout}s) for query: {search_query}")
         return []
     except Exception as exc:
         logger.warning(f"[SearxNG] Error: {exc}")
@@ -75,53 +72,34 @@ async def get_product_urls(
 ) -> list[str]:
     """
     Получает URL карточек товаров через SearxNG для конкретного маркетплейса.
-    
-    Args:
-        query: Поисковый запрос ("ноутбук lenovo")
-        source: "wildberries" | "ozon" | "yandex_market"
-        limit: Максимум ссылок
-    
-    Returns:
-        Список URL карточек товаров
     """
     site_map = {
         "wildberries": "wildberries.ru",
         "ozon": "ozon.ru",
         "yandex_market": "market.yandex.ru",
     }
-    
-    product_path_patterns = {
-        "wildberries": "/catalog/",
-        "ozon": "/product/",
-        "yandex_market": "/product/",
-    }
-    
+
     site = site_map.get(source)
     if not site:
         return []
-    
+
     results = await searxng_search(query, site_filter=site, limit=limit * 2)
-    
-    pattern = product_path_patterns.get(source, "/product/")
-    
+
     urls: list[str] = []
     seen: set[str] = set()
-    
+
     for r in results:
         url = r.get("url", "")
         if not url:
             continue
-        
-        # Фильтруем только карточки товаров (не поиск, не категории)
+
         parsed = urlparse(url)
         path_lower = parsed.path.lower()
-        
-        # Проверяем что это карточка товара
+
         is_product = False
         if source == "wildberries":
-            # WB: /catalog/12345678/detail.aspx или /catalog/12345678/
             is_product = bool(
-                "/catalog/" in path_lower 
+                "/catalog/" in path_lower
                 and any(c.isdigit() for c in path_lower.split("/catalog/")[-1][:10])
                 and "/search" not in path_lower
             )
@@ -129,20 +107,19 @@ async def get_product_urls(
             is_product = "/product/" in path_lower
         elif source == "yandex_market":
             is_product = "/product/" in path_lower or "/offer/" in path_lower
-        
+
         if not is_product:
             continue
-        
-        # Дедупликация по пути без query string
+
         clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
         if clean_url in seen:
             continue
         seen.add(clean_url)
         urls.append(url)
-        
+
         if len(urls) >= limit:
             break
-    
+
     logger.info(f"[SearxNG] {source}: {len(urls)} product URLs from {len(results)} search results")
     return urls
 
@@ -150,7 +127,7 @@ async def get_product_urls(
 async def is_available() -> bool:
     """Проверяет доступность SearxNG."""
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(f"{SEARXNG_URL}/healthz")
             return resp.status_code == 200
     except Exception:

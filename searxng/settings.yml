@@ -24,8 +24,8 @@ ui:
 
 search:
   safe_search: 0
-  autocomplete: ""
-  default_lang: "ru"
+  autocomplete: "google"
+  default_lang: "ru-RU"
   ban_time_on_fail: 5
   max_ban_time_on_fail: 120
   formats:
@@ -38,37 +38,3 @@ outgoing:
   pool_connections: 100
   pool_maxsize: 20
   enable_http2: true
-
-engines:
-  - name: google
-    engine: google
-    language: ru
-    region: ru-RU
-    disabled: false
-    weight: 3
-
-  - name: bing
-    engine: bing
-    language: ru
-    region: ru-RU
-    disabled: false
-    weight: 2
-
-  - name: duckduckgo
-    engine: duckduckgo
-    language: ru
-    region: ru-ru
-    disabled: false
-    weight: 1
-
-  - name: yandex
-    engine: yandex
-    language: ru
-    disabled: false
-    weight: 2
-
-categories_as_tabs:
-  general:
-    name: General
-    title: Поиск
-    shown: true
