@@ -34,7 +34,7 @@ class YandexMarketParser:
                 try:
                     resp = await asyncio.wait_for(
                         fetcher.get_text(url, source=self.source, headers=headers, retries=0),
-                        timeout=4,
+                        timeout=12,
                     )
                 except asyncio.TimeoutError:
                     _conn_errors += 1

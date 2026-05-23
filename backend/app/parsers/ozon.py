@@ -34,7 +34,7 @@ class OzonParser:
                     try:
                         resp = await asyncio.wait_for(
                             fetcher.get_text(url, source=self.source, headers=browser_headers(source=self.source), retries=0),
-                            timeout=4,
+                            timeout=12,
                         )
                     except asyncio.TimeoutError:
                         _conn_errors += 1
@@ -119,7 +119,7 @@ class OzonParser:
             try:
                 resp = await asyncio.wait_for(
                     fetcher.get_json(endpoint, source=self.source, headers=headers, retries=0),
-                    timeout=3,
+                    timeout=10,
                 )
             except Exception:
                 continue

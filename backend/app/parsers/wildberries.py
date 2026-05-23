@@ -63,7 +63,7 @@ class WildberriesParser:
                 try:
                     resp = await asyncio.wait_for(
                         fetcher.get_json(endpoint, source=self.source, headers=json_headers(source=self.source), params=params, retries=0),
-                        timeout=2.5,
+                        timeout=12,
                     )
                 except asyncio.TimeoutError:
                     _conn_errors += 1
@@ -86,7 +86,7 @@ class WildberriesParser:
 
             for idx, item in enumerate(items[: min(limit, 3)]):
                 try:
-                    detail = await asyncio.wait_for(self._detail(fetcher, item.productId, item.url, region, category), timeout=2.5)
+                    detail = await asyncio.wait_for(self._detail(fetcher, item.productId, item.url, region, category), timeout=8)
                 except Exception:
                     detail = None
                 items[idx] = merge_product_data(item, detail)
