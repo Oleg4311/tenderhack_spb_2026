@@ -1,0 +1,682 @@
+"""
+RDT Query Expander — расширение поисковых запросов с поддержкой синонимов и фраз.
+Версия: 2.1 Production Ready
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import logging
+import re
+import time
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime
+from functools import lru_cache
+from itertools import islice, product
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+# ── Логирование ───────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ── Морфология (опционально) ──────────────────────────────────────────────
+try:
+    from pymorphy3 import MorphAnalyzer
+
+    MORPH_AVAILABLE = True
+    morph = MorphAnalyzer()
+except ImportError:
+    try:
+        from pymorphy2 import MorphAnalyzer
+
+        MORPH_AVAILABLE = True
+        morph = MorphAnalyzer()
+    except ImportError:
+        MORPH_AVAILABLE = False
+        logger.warning("pymorphy3 / pymorphy2 не установлен. Морфологическая нормализация отключена.")
+        morph = None
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  DATA CLASSES                                                           ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+@dataclass
+class SynonymWeight:
+    """Взвешенный синоним."""
+    word: str
+    weight: float = 1.0
+
+    def __repr__(self) -> str:
+        return f"SynonymWeight(word={self.word!r}, weight={self.weight:.2f})"
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  STOP WORDS MANAGER                                                     ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+class StopWordsManager:
+    """
+    Управление стоп-словами.
+    Стоп-слова НЕ расширяются синонимами и по умолчанию исключаются
+    из токенов запроса.
+    """
+
+    DEFAULT_STOP_WORDS: Set[str] = {
+        # Русские
+        "и", "в", "на", "с", "к", "у", "о", "об", "для", "без", "до",
+        "по", "за", "под", "над", "из", "от", "перед", "при", "через",
+        "а", "но", "или", "либо", "то", "это", "так", "вот", "же",
+        "бы", "да", "нет", "не", "ни", "что", "как", "также", "где",
+        "куда", "откуда", "когда", "почему", "зачем", "какой", "какая",
+        "какое", "какие", "чей", "чья", "чьё", "чьи", "который",
+        "весь", "вся", "всё", "все", "самый", "каждый", "любой",
+        "я", "мы", "ты", "вы", "он", "она", "они", "оно",
+        "мой", "твой", "наш", "ваш", "его", "её", "их",
+        "себя", "мне", "меня", "тебе", "тебя", "ещё", "уже",
+        "был", "была", "было", "были", "будет", "будут", "есть",
+        "можно", "нужно", "надо", "должен", "очень", "более", "менее",
+        # Английские
+        "the", "a", "an", "and", "or", "but", "in", "on", "at",
+        "to", "for", "of", "with", "from", "by", "is", "are", "was",
+        "were", "be", "been", "being", "have", "has", "had", "do",
+        "does", "did", "will", "would", "could", "should", "may",
+        "might", "can", "shall", "you", "i", "he", "she", "it",
+        "we", "they", "me", "him", "her", "us", "them", "my", "your",
+        "his", "its", "our", "their", "this", "that", "these", "those",
+        "where", "when", "why", "how", "which", "who", "whom", "whose",
+        "all", "any", "each", "every", "some", "no", "not", "very",
+        "just", "only", "also", "too", "here", "there", "now", "then",
+    }
+
+    def __init__(self, custom_stop_words: Optional[Set[str]] = None) -> None:
+        self.stop_words: Set[str] = self.DEFAULT_STOP_WORDS.copy()
+        if custom_stop_words:
+            self.stop_words.update(w.lower() for w in custom_stop_words)
+
+    def is_stop_word(self, word: str) -> bool:
+        return word.lower() in self.stop_words
+
+    def add_stop_word(self, word: str) -> None:
+        w = word.lower()
+        if w not in self.stop_words:
+            self.stop_words.add(w)
+            logger.info("Добавлено стоп-слово: '%s'", word)
+
+    def remove_stop_word(self, word: str) -> None:
+        self.stop_words.discard(word.lower())
+        logger.info("Удалено стоп-слово: '%s'", word)
+
+    def filter(self, words: Iterable[str]) -> List[str]:
+        return [w for w in words if not self.is_stop_word(w)]
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  RDT QUERY EXPANDER                                                     ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+class RDTQueryExpander:
+    def __init__(
+        self,
+        synonyms_file: Optional[str] = None,
+        enable_cache: bool = True,
+        max_combinations: int = 100,
+        auto_detect_phrases: bool = True,
+        bidirectional: bool = True,
+        custom_stop_words: Optional[Set[str]] = None,
+    ) -> None:
+        self.synonyms: Dict[str, List[SynonymWeight]] = {}
+        self._phrase_set: Set[str] = set()
+
+        self.enable_cache = enable_cache
+        self.max_combinations = max_combinations
+        self.auto_detect_phrases = auto_detect_phrases
+        self.bidirectional = bidirectional
+
+        self.stop_words_manager = StopWordsManager(custom_stop_words)
+
+        self.usage_stats: Counter = Counter()
+        self.expansion_history: List[Dict[str, Any]] = []
+
+        if synonyms_file:
+            self.load_synonyms(synonyms_file)
+        else:
+            self._load_default_synonyms()
+
+        logger.info(
+            "RDTQueryExpander готов. Ключей: %d, фраз: %d, "
+            "bidirectional: %s, кэш: %s.",
+            len(self.synonyms),
+            len(self._phrase_set),
+            self.bidirectional,
+            "вкл" if self.enable_cache else "выкл",
+        )
+
+    def _load_default_synonyms(self) -> None:
+        defaults: Dict[str, List[Tuple[str, float]]] = {
+            "ноутбук": [("лэптоп", 0.90), ("портативный компьютер", 0.80), ("ноут", 0.60)],
+            "apple": [("macbook", 0.95), ("mac", 0.85), ("яблочный", 0.50)],
+            "купить": [("приобрести", 0.90), ("заказать", 0.80), ("оформить", 0.50)],
+            "недорогой": [("бюджетный", 0.90), ("дешёвый", 0.70), ("доступный", 0.80)],
+            "искусственный интеллект": [("нейронные сети", 0.80), ("машинное обучение", 0.85), ("AI", 0.90)],
+            "смартфон": [("мобильный телефон", 0.95), ("телефон", 0.70), ("гаджет", 0.60)],
+            "санкт-петербург": [("спб", 0.95), ("питер", 0.90), ("ленинград", 0.40)],
+            "быстрый": [("скорый", 0.80), ("оперативный", 0.75), ("проворный", 0.50)],
+            "хороший": [("отличный", 0.85), ("превосходный", 0.70), ("качественный", 0.80)],
+            "ремонт": [("починка", 0.90), ("восстановление", 0.70), ("сервис", 0.60)],
+            "москва": [("мск", 0.95), ("столица", 0.50)],
+        }
+        for key, syns in defaults.items():
+            self.synonyms[key] = [SynonymWeight(w, wt) for w, wt in syns]
+            if " " in key:
+                self._phrase_set.add(key)
+
+        if self.bidirectional:
+            self._build_reverse_index()
+
+    def load_synonyms(self, file_path: str) -> None:
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Файл словаря не найден: {file_path}")
+
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+
+        for key, value in data.items():
+            key_norm = self._normalize_word(key)
+            if isinstance(value, list):
+                if all(isinstance(v, str) for v in value):
+                    self.synonyms[key_norm] = [SynonymWeight(v, 1.0) for v in value]
+                elif all(isinstance(v, dict) for v in value):
+                    self.synonyms[key_norm] = [
+                        SynonymWeight(v["word"], v.get("weight", 1.0)) for v in value
+                    ]
+            elif isinstance(value, dict):
+                self.synonyms[key_norm] = [SynonymWeight(w, wt) for w, wt in value.items()]
+            else:
+                logger.warning("Пропущен ключ '%s' — неизвестный формат.", key)
+                continue
+
+            if " " in key_norm:
+                self._phrase_set.add(key_norm)
+
+        if self.bidirectional:
+            self._build_reverse_index()
+
+        self._clear_cache()
+        logger.info("Загружено %d ключей из %s.", len(self.synonyms), file_path)
+
+    def save_synonyms(self, file_path: str) -> None:
+        output: Dict[str, List[Dict[str, Any]]] = {}
+        for key, weights in self.synonyms.items():
+            output[key] = [{"word": sw.word, "weight": sw.weight} for sw in weights]
+        with open(file_path, "w", encoding="utf-8") as fh:
+            json.dump(output, fh, ensure_ascii=False, indent=2)
+        logger.info("Словарь сохранён: %s (%d ключей).", file_path, len(output))
+
+    def _build_reverse_index(self) -> None:
+        additions: Dict[str, List[SynonymWeight]] = {}
+        for base, syn_list in self.synonyms.items():
+            for sw in syn_list:
+                rev_key = self._normalize_word(sw.word)
+                
+                existing = False
+                if rev_key in self.synonyms:
+                    if any(s.word == base for s in self.synonyms[rev_key]):
+                        existing = True
+                
+                if rev_key in additions:
+                    if any(s.word == base for s in additions[rev_key]):
+                        existing = True
+                        
+                if not existing:
+                    additions.setdefault(rev_key, []).append(SynonymWeight(base, sw.weight))
+
+        for key, syns in additions.items():
+            if key in self.synonyms:
+                self.synonyms[key].extend(syns)
+            else:
+                self.synonyms[key] = syns
+            if " " in key:
+                self._phrase_set.add(key)
+
+        total_added = sum(len(v) for v in additions.values())
+        if total_added > 0:
+            logger.info("Добавлено %d обратных связей (bidirectional).", total_added)
+
+    def add_synonym(self, word: str, synonym: str, weight: float = 1.0) -> None:
+        word_norm = self._normalize_word(word)
+        self.synonyms.setdefault(word_norm, [])
+
+        for sw in self.synonyms[word_norm]:
+            if sw.word == synonym:
+                sw.weight = weight
+                logger.info("Обновлён вес '%s' → '%s': %.2f", word_norm, synonym, weight)
+                self._clear_cache()
+                return
+
+        self.synonyms[word_norm].append(SynonymWeight(synonym, weight))
+        if " " in word_norm:
+            self._phrase_set.add(word_norm)
+
+        if self.bidirectional:
+            rev_key = self._normalize_word(synonym)
+            self.synonyms.setdefault(rev_key, [])
+            if not any(sw.word == word_norm for sw in self.synonyms[rev_key]):
+                self.synonyms[rev_key].append(SynonymWeight(word_norm, weight))
+                if " " in rev_key:
+                    self._phrase_set.add(rev_key)
+
+        self._clear_cache()
+        logger.info("Добавлен синоним '%s' (вес:%.2f) для '%s'.", synonym, weight, word_norm)
+
+    def remove_synonym(self, word: str, synonym: str) -> bool:
+        word_norm = self._normalize_word(word)
+        if word_norm not in self.synonyms:
+            logger.warning("Ключ '%s' не найден в словаре.", word_norm)
+            return False
+
+        before = len(self.synonyms[word_norm])
+        self.synonyms[word_norm] = [sw for sw in self.synonyms[word_norm] if sw.word != synonym]
+        after = len(self.synonyms[word_norm])
+
+        if after == 0:
+            del self.synonyms[word_norm]
+            self._phrase_set.discard(word_norm)
+
+        if after < before:
+            self._clear_cache()
+            logger.info("Удалён синоним '%s' для '%s'.", synonym, word_norm)
+            return True
+
+        logger.warning("Синоним '%s' для '%s' не найден.", synonym, word_norm)
+        return False
+
+    def _normalize_word(self, word: str) -> str:
+        w = word.strip()
+        if not w:
+            return w
+        w_lower = w.lower()
+        if MORPH_AVAILABLE and len(w_lower) > 1 and w_lower.replace("-", "").isalpha():
+            try:
+                parsed = morph.parse(w_lower)[0]
+                return parsed.normal_form
+            except Exception:
+                return w_lower
+        return w_lower
+
+    def _detect_phrases(self, query: str) -> Tuple[str, List[str]]:
+        if not self.auto_detect_phrases or not self._phrase_set:
+            return query, []
+
+        detected: List[str] = []
+        query_lower = query.lower()
+        phrases_sorted = sorted(self._phrase_set, key=len, reverse=True)
+
+        replacements: List[Tuple[int, int, str]] = []
+
+        for phrase in phrases_sorted:
+            start = 0
+            while True:
+                idx = query_lower.find(phrase, start)
+                if idx == -1:
+                    break
+                left_ok = idx == 0 or not query_lower[idx - 1].isalnum()
+                right_ok = (
+                    idx + len(phrase) == len(query_lower)
+                    or not query_lower[idx + len(phrase)].isalnum()
+                )
+                if left_ok and right_ok:
+                    overlaps = any(
+                        idx < e and idx + len(phrase) > s
+                        for s, e, _ in replacements
+                    )
+                    if not overlaps:
+                        replacements.append((idx, idx + len(phrase), phrase))
+                        detected.append(phrase)
+                start = idx + 1
+
+        result_chars = list(query)
+        for start, end, phrase in sorted(
+            replacements, key=lambda x: x[0], reverse=True
+        ):
+            result_chars[start:end] = [f'"{phrase}"']
+
+        return "".join(result_chars), detected
+
+    def _parse_tokens(self, query: str) -> List[Tuple[str, str]]:
+        tokens: List[Tuple[str, str]] = []
+
+        query_with_quotes, _ = self._detect_phrases(query)
+
+        # Токенизируем, сохраняя порядок
+        # Ищем фразы в кавычках ИЛИ обычные слова (допускаем слова с дефисами)
+        pattern = re.compile(r'"([^"]+)"|([а-яёa-z0-9]+(?:-[а-яёa-z0-9]+)*)', re.IGNORECASE)
+        for match in pattern.finditer(query_with_quotes):
+            phrase = match.group(1)
+            word = match.group(2)
+
+            if phrase:
+                p = phrase.lower().strip()
+                if p:
+                    tokens.append(("phrase", p))
+            elif word:
+                if not self.stop_words_manager.is_stop_word(word):
+                    norm = self._normalize_word(word)
+                    if norm:
+                        tokens.append(("word", norm))
+
+        return tokens
+
+    def _get_synonyms_with_weights(self, term: str) -> List[Tuple[str, float]]:
+        seen: Dict[str, float] = {term: 1.0}
+
+        if term in self.synonyms:
+            for sw in self.synonyms[term]:
+                seen[sw.word] = max(seen.get(sw.word, 0.0), sw.weight)
+
+        term_norm = self._normalize_word(term)
+        if term_norm != term and term_norm in self.synonyms:
+            for sw in self.synonyms[term_norm]:
+                seen[sw.word] = max(seen.get(sw.word, 0.0), sw.weight)
+
+        return sorted(seen.items(), key=lambda x: x[1], reverse=True)
+
+    def _expand_impl(self, query: str, return_format: str) -> Dict[str, Any]:
+        t0 = datetime.now()
+        logger.info("Расширение: %s", query)
+
+        tokens = self._parse_tokens(query)
+
+        if not tokens:
+            return {
+                "original": query,
+                "expanded": False,
+                "or_query": query,
+                "variants": [query],
+                "variants_count": 1,
+                "tokens": [],
+                "processing_time": (datetime.now() - t0).total_seconds(),
+            }
+
+        groups: List[List[str]] = []
+        for tok_type, tok_value in tokens:
+            syns = self._get_synonyms_with_weights(tok_value)
+            group: List[str] = []
+            for word, _ in syns:
+                if tok_type == "phrase" and " " in word:
+                    group.append(f'"{word}"')
+                else:
+                    group.append(word)
+            groups.append(group)
+
+        for g in groups:
+            for term in g:
+                self.usage_stats[term] += 1
+
+        or_parts = ["(" + " OR ".join(g) + ")" for g in groups]
+        or_query = " AND ".join(or_parts)
+
+        total = 1
+        for g in groups:
+            total *= len(g)
+        variants_count = min(total, self.max_combinations)
+
+        variants: List[str] = []
+        if return_format in ("variants", "all") and groups:
+            for combo in islice(product(*groups), self.max_combinations):
+                variants.append(" ".join(combo))
+
+        self.expansion_history.append(
+            {
+                "original": query,
+                "or_query": or_query,
+                "tokens_count": len(tokens),
+                "variants_count": variants_count,
+                "timestamp": t0.isoformat(),
+            }
+        )
+
+        return {
+            "original": query,
+            "expanded": True,
+            "tokens": tokens,
+            "or_query": or_query,
+            "variants": variants[: self.max_combinations],
+            "variants_count": variants_count,
+            "processing_time": (datetime.now() - t0).total_seconds(),
+        }
+
+    def expand(self, query: str, return_format: str = "or_query") -> Dict[str, Any]:
+        result = (
+            self._expand_cached(query, return_format)
+            if self.enable_cache
+            else self._expand_impl(query, return_format)
+        )
+        return _ensure_lists(result)
+
+    @lru_cache(maxsize=1000)
+    def _expand_cached(self, query: str, return_format: str) -> Dict[str, Any]:
+        raw = self._expand_impl(query, return_format)
+        return _tuplify_lists(raw)
+
+    def _clear_cache(self) -> None:
+        if self.enable_cache:
+            self._expand_cached.cache_clear()
+            logger.info("Кэш очищен.")
+
+    def get_stats(self) -> Dict[str, Any]:
+        cache_info = None
+        if self.enable_cache:
+            ci = self._expand_cached.cache_info()
+            cache_info = {
+                "hits": ci.hits,
+                "misses": ci.misses,
+                "currsize": ci.currsize,
+                "maxsize": ci.maxsize,
+            }
+
+        return {
+            "total_synonyms": sum(len(v) for v in self.synonyms.values()),
+            "unique_keys": len(self.synonyms),
+            "phrase_keys": len(self._phrase_set),
+            "most_used": self.usage_stats.most_common(10),
+            "total_expansions": len(self.expansion_history),
+            "cache_info": cache_info,
+            "morphology_enabled": MORPH_AVAILABLE,
+            "auto_detect_phrases": self.auto_detect_phrases,
+            "bidirectional": self.bidirectional,
+            "max_combinations": self.max_combinations,
+        }
+
+    def export_for_elasticsearch(self, query: str) -> Dict[str, Any]:
+        expanded = self.expand(query, return_format="or_query")
+        if not expanded["expanded"]:
+            return {"query": {"match": {"content": query}}}
+        return {
+            "query": {
+                "query_string": {
+                    "query": expanded["or_query"],
+                    "default_operator": "AND",
+                }
+            }
+        }
+
+    def export_for_sql(self, query: str, column: str = "content", limit: int = 10) -> str:
+        expanded = self.expand(query, return_format="variants")
+        variants = expanded.get("variants", [])
+        if not variants:
+            return f"{column} LIKE '%{query}%'"
+        conditions = [f"{column} LIKE '%{v}%'" for v in variants[:limit]]
+        return " OR ".join(conditions)
+
+    def export_for_plain(self, query: str) -> List[str]:
+        expanded = self.expand(query, return_format="variants")
+        return expanded.get("variants", [])
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  HELPERS                                                                ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+def _tuplify_lists(d: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: tuple(v) if isinstance(v, list) else v for k, v in d.items()}
+
+def _ensure_lists(d: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: list(v) if isinstance(v, tuple) else v for k, v in d.items()}
+
+def create_synonyms_from_csv(csv_file: str, output_json: str) -> None:
+    synonyms: Dict[str, List[str]] = {}
+    with open(csv_file, "r", encoding="utf-8") as fh:
+        for row in csv.reader(fh):
+            if row:
+                key = row[0].strip()
+                values = [v.strip() for v in row[1:] if v.strip()]
+                if key and values:
+                    synonyms[key] = values
+
+    with open(output_json, "w", encoding="utf-8") as fh:
+        json.dump(synonyms, fh, ensure_ascii=False, indent=2)
+
+    logger.info("CSV → JSON: %d записей сохранено в %s.", len(synonyms), output_json)
+
+def benchmark_expander(expander: RDTQueryExpander, queries: List[str]) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    for query in queries:
+        t_start = time.perf_counter()
+        res = expander.expand(query)
+        elapsed = time.perf_counter() - t_start
+        results.append(
+            {
+                "query": query,
+                "time_ms": round(elapsed * 1000, 3),
+                "variants": res["variants_count"],
+                "expanded": res["expanded"],
+            }
+        )
+
+    if results:
+        avg = sum(r["time_ms"] for r in results) / len(results)
+        print(f"\n📊 Бенчмарк ({len(queries)} запросов):")
+        print(f"   Среднее время: {avg:.2f} мс")
+        print("   Всего вариантов:", sum(r["variants"] for r in results))
+
+    return results
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  DEMO                                                                   ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+def main() -> RDTQueryExpander:
+    print("\n" + "=" * 70)
+    print("🚀  RDT Query Expander v2.1 — Production Ready")
+    print("=" * 70 + "\n")
+
+    expander = RDTQueryExpander(
+        enable_cache=True,
+        max_combinations=20,
+        bidirectional=True,
+    )
+
+    stats = expander.get_stats()
+    print("📊 Статистика после инициализации:")
+    print(f"   Уникальных ключей:    {stats['unique_keys']}")
+    print(f"   Всего синонимов:      {stats['total_synonyms']}")
+    print(f"   Фразовых ключей:      {stats['phrase_keys']}")
+    print(f"   Морфология:           {'✅' if stats['morphology_enabled'] else '❌'}")
+    print(f"   Двусторонние связи:   {'✅' if stats['bidirectional'] else '❌'}")
+    print(f"   Автоопределение фраз: {'✅' if stats['auto_detect_phrases'] else '❌'}")
+
+    test_queries = [
+        "купить ноутбук",
+        "недорогой смартфон спб",
+        "ремонт apple",
+        "искусственный интеллект обучение",
+        "хороший быстрый ноутбук",
+        "где купить macbook недорого",
+    ]
+
+    print("\n" + "=" * 70)
+    print("🔍  ТЕСТИРОВАНИЕ РАСШИРЕНИЯ")
+    print("=" * 70)
+
+    for query in test_queries:
+        print(f"\n📝 Запрос:  {query}")
+        result = expander.expand(query, return_format="all")
+        print(f"   ⏱️  {result['processing_time'] * 1000:.2f} мс")
+        print(f"   🔬 Токены: {result['tokens']}")
+        print(f"   🎯 OR/AND:  {result['or_query']}")
+        if result["variants"]:
+            shown = min(5, len(result["variants"]))
+            print(f"   📋 Варианты ({shown}/{result['variants_count']}):")
+            for v in result["variants"][:shown]:
+                print(f"      • {v}")
+
+    print("\n" + "=" * 70)
+    print("📤  ЭКСПОРТ")
+    print("=" * 70)
+
+    q = "купить недорогой ноутбук"
+    es = expander.export_for_elasticsearch(q)
+    print("\n🔷 Elasticsearch:")
+    print(json.dumps(es, ensure_ascii=False, indent=2))
+
+    sql = expander.export_for_sql(q, "title")
+    print(f"\n🔷 SQL (первые 200 символов):\n   {sql[:200]}...")
+
+    plain = expander.export_for_plain(q)
+    print(f"\n🔷 Plain (первые 5):")
+    for p in plain[:5]:
+        print(f"   • {p}")
+
+    print("\n" + "=" * 70)
+    print("➕  ДИНАМИЧЕСКОЕ ДОБАВЛЕНИЕ")
+    print("=" * 70)
+
+    expander.add_synonym("ноутбук", "ультрабук", weight=0.85)
+    expander.add_synonym("ноутбук", "нетбук", weight=0.70)
+    r = expander.expand("ноутбук", return_format="variants")
+    print("Варианты для «ноутбук» после добавления:")
+    for v in r["variants"]:
+        print(f"   • {v}")
+
+    print("\n" + "=" * 70)
+    print("➖  УДАЛЕНИЕ СИНОНИМА")
+    print("=" * 70)
+    expander.remove_synonym("ноутбук", "нетбук")
+    r2 = expander.expand("ноутбук", return_format="variants")
+    print("После удаления «нетбук»:")
+    for v in r2["variants"]:
+        print(f"   • {v}")
+
+    print("\n" + "=" * 70)
+    print("📊  ИТОГОВАЯ СТАТИСТИКА")
+    print("=" * 70)
+    fs = expander.get_stats()
+    print(f"   Обработано запросов:  {fs['total_expansions']}")
+    print(f"   Топ-5 терминов:       {fs['most_used'][:5]}")
+    if fs["cache_info"]:
+        ci = fs["cache_info"]
+        print(f"   Кэш:  hits={ci['hits']}, misses={ci['misses']}, "
+              f"size={ci['currsize']}/{ci['maxsize']}")
+
+    print("\n" + "=" * 70)
+    print("⚡  БЕНЧМАРК")
+    print("=" * 70)
+    benchmark_expander(
+        expander,
+        ["купить ноутбук", "apple смартфон", "быстрый ремонт мск"],
+    )
+
+    print("\n✅  Готово!\n")
+    return expander
+
+if __name__ == "__main__":
+    _expander = main()
