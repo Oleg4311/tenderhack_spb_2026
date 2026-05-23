@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from typing import Any
 
@@ -8,6 +9,8 @@ from app.parsers.query_normalizer import expand_query, normalize_query
 from app.parsers.runet import RunetParser
 from app.parsers.wildberries import WildberriesParser
 from app.parsers.yandex_market import YandexMarketParser
+
+logger = logging.getLogger(__name__)
 
 PARSERS = {
     "wildberries": WildberriesParser,
@@ -21,13 +24,11 @@ HEALTH: dict[str, dict[str, Any]] = {
     for source in SOURCE_KEYS
 }
 
-
 async def _run_source(source: str, query: str, expanded: list[str], category: str, region: str, limit: int) -> SourceResult:
     started = time.perf_counter()
     try:
         parser = PARSERS[source]()
         result = await asyncio.wait_for(parser.search(query, region=region, limit=limit, category=category), timeout=28)
-        
 
         # ── SearxNG fallback при блокировке ──
         if result.status == "blocked" and source != "runet":
@@ -39,8 +40,6 @@ async def _run_source(source: str, query: str, expanded: list[str], category: st
                     result.diagnostics["recovery"] = "searxng_fallback"
             except Exception as exc:
                 logger.warning(f"[{source}] SearxNG fallback failed: {exc}")
-
-
 
         if result.status == "empty" and source != "runet":
             for variant in expanded[1:3]:
@@ -63,7 +62,6 @@ async def _run_source(source: str, query: str, expanded: list[str], category: st
         HEALTH[source] = {"source": source, "status": "error", "lastError": str(exc), "lastLatencyMs": int((time.perf_counter() - started) * 1000), "lastItemsCount": 0}
         return SourceResult(source, "error", errorReason=str(exc))
 
-
 def _postprocess(result: SourceResult, normalized: str, limit: int) -> SourceResult:
     cleaned = []
     for item in result.items:
@@ -81,7 +79,6 @@ def _postprocess(result: SourceResult, normalized: str, limit: int) -> SourceRes
     if result.status == "ok" and not result.items:
         result.status = "empty"
     return result
-
 
 async def search_products(query: str, category: str, region: str, limit: int = 10) -> dict[str, Any]:
     normalized = normalize_query(query, category)
@@ -129,7 +126,6 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
             "sourcesUsed": [source for source, group in groups.items() if group["count"] > 0],
         },
     }
-
 
 def parsers_health() -> list[dict[str, Any]]:
     return [HEALTH[source] for source in SOURCE_KEYS]

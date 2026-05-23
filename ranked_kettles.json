@@ -1,0 +1,877 @@
+[
+  {
+    "Артикул": "K009",
+    "Бренд": "Braun",
+    "Модель": "WK600",
+    "Цена": 4990,
+    "Мощность (Вт)": 2400,
+    "Объём (л)": 1.7,
+    "Материал": "металл",
+    "Цвет": "чёрный",
+    "Тип": "электрический",
+    "источник": "other",
+    "итоговый_балл": 0.7358,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.8282828282828283
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.82
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.7184466019417476
+      },
+      "iteration_other": {
+        "role": "reference",
+        "score": 1.0
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.3125
+      }
+    }
+  },
+  {
+    "Артикул": "K001",
+    "Бренд": "Bosch",
+    "Модель": "TWK3P423",
+    "Цена": 3290,
+    "Мощность (Вт)": 2400,
+    "Объём (л)": 1.7,
+    "Материал": "металл",
+    "Цвет": "чёрный",
+    "Тип": "электрический",
+    "источник": "Wildberries",
+    "итоговый_балл": 0.7198,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "reference",
+        "score": 1.0
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.7884615384615384
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.6792452830188679
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.8282828282828283
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.30303030303030304
+      }
+    }
+  },
+  {
+    "Артикул": "K005",
+    "Бренд": "Polaris",
+    "Модель": "PWK 1705CL",
+    "Цена": 2190,
+    "Мощность (Вт)": 2200,
+    "Объём (л)": 1.7,
+    "Материал": "металл",
+    "Цвет": "серебристый",
+    "Тип": "электрический",
+    "источник": "Ozon",
+    "итоговый_балл": 0.7146,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.782608695652174
+      },
+      "iteration_Ozon": {
+        "role": "reference",
+        "score": 0.8571428571428572
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.8173913043478261
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.782608695652174
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.3333333333333333
+      }
+    }
+  },
+  {
+    "Артикул": "K002",
+    "Бренд": "Tefal",
+    "Модель": "KI240D30",
+    "Цена": 2790,
+    "Мощность (Вт)": 2200,
+    "Объём (л)": 1.5,
+    "Материал": "пластик",
+    "Цвет": "белый",
+    "Тип": "электрический",
+    "источник": "Ozon",
+    "итоговый_балл": 0.6868,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.7722772277227723
+      },
+      "iteration_Ozon": {
+        "role": "reference",
+        "score": 1.0
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.6415094339622641
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.6262626262626263
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.393939393939394
+      }
+    }
+  },
+  {
+    "Артикул": "K003",
+    "Бренд": "Philips",
+    "Модель": "HD9355",
+    "Цена": 3990,
+    "Мощность (Вт)": 2200,
+    "Объём (л)": 1.7,
+    "Материал": "стекло",
+    "Цвет": "прозрачный",
+    "Тип": "электрический",
+    "источник": "Yandex Market",
+    "итоговый_балл": 0.6835,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.8073394495412844
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.6296296296296297
+      },
+      "iteration_Yandex Market": {
+        "role": "reference",
+        "score": 1.0
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.6019417475728155
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.3786407766990291
+      }
+    }
+  },
+  {
+    "Артикул": "K007",
+    "Бренд": "Bork",
+    "Модель": "K800",
+    "Цена": 8990,
+    "Мощность (Вт)": 2200,
+    "Объём (л)": 1.7,
+    "Материал": "стекло",
+    "Цвет": "прозрачный",
+    "Тип": "электрический",
+    "источник": "Wildberries",
+    "итоговый_балл": 0.6829,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "reference",
+        "score": 0.75
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.7058823529411765
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.8461538461538461
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.7142857142857143
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.3979591836734694
+      }
+    }
+  },
+  {
+    "Артикул": "K012",
+    "Бренд": "Vitek",
+    "Модель": "VT-2157",
+    "Цена": 2290,
+    "Мощность (Вт)": 2200,
+    "Объём (л)": 1.7,
+    "Материал": "металл",
+    "Цвет": "серебристый",
+    "Тип": "электрический",
+    "источник": "Yandex Market",
+    "итоговый_балл": 0.6676,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.8545454545454545
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.8173913043478261
+      },
+      "iteration_Yandex Market": {
+        "role": "reference",
+        "score": 0.6
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.7454545454545455
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.3203883495145631
+      }
+    }
+  },
+  {
+    "Артикул": "K010",
+    "Бренд": "Gorenje",
+    "Модель": "K17CW",
+    "Цена": 2590,
+    "Мощность (Вт)": 2200,
+    "Объём (л)": 1.7,
+    "Материал": "пластик",
+    "Цвет": "белый",
+    "Тип": "электрический",
+    "источник": "Wildberries",
+    "итоговый_балл": 0.6118,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "reference",
+        "score": 0.625
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.7722772277227723
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.6923076923076923
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.6326530612244898
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.336734693877551
+      }
+    }
+  },
+  {
+    "Артикул": "K014",
+    "Бренд": "Kitfort",
+    "Модель": "KT-2601",
+    "Цена": 3990,
+    "Мощность (Вт)": 2200,
+    "Объём (л)": 1.7,
+    "Материал": "металл",
+    "Цвет": "чёрный",
+    "Тип": "электрический",
+    "источник": "Ozon",
+    "итоговый_балл": 0.6045,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.7476635514018691
+      },
+      "iteration_Ozon": {
+        "role": "reference",
+        "score": 0.4285714285714286
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.7663551401869159
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.78
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.30000000000000004
+      }
+    }
+  },
+  {
+    "Артикул": "K008",
+    "Бренд": "Panasonic",
+    "Модель": "NC-K221",
+    "Цена": 3590,
+    "Мощность (Вт)": 1500,
+    "Объём (л)": 1.2,
+    "Материал": "стекло",
+    "Цвет": "белый",
+    "Тип": "электрический",
+    "источник": "Ozon",
+    "итоговый_балл": 0.5996,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.7037037037037037
+      },
+      "iteration_Ozon": {
+        "role": "reference",
+        "score": 0.7142857142857143
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.6296296296296297
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.594059405940594
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.3564356435643564
+      }
+    }
+  },
+  {
+    "Артикул": "K016",
+    "Бренд": "Zelmer",
+    "Модель": "13Z016",
+    "Цена": 2490,
+    "Мощность (Вт)": 2200,
+    "Объём (л)": 1.7,
+    "Материал": "стекло",
+    "Цвет": "прозрачный",
+    "Тип": "электрический",
+    "источник": "Wildberries",
+    "итоговый_балл": 0.5784,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "reference",
+        "score": 0.375
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.6728971962616822
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.8148148148148148
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.6470588235294118
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.38235294117647056
+      }
+    }
+  },
+  {
+    "Артикул": "K022",
+    "Бренд": "First",
+    "Модель": "FA-5055",
+    "Цена": 2290,
+    "Мощность (Вт)": 2200,
+    "Объём (л)": 1.7,
+    "Материал": "металл",
+    "Цвет": "серебристый",
+    "Тип": "электрический",
+    "источник": "Wildberries",
+    "итоговый_балл": 0.5762,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "reference",
+        "score": 0.125
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.8173913043478261
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.8545454545454545
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.7636363636363637
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.3203883495145631
+      }
+    }
+  },
+  {
+    "Артикул": "K021",
+    "Бренд": "Rolsen",
+    "Модель": "RK1708",
+    "Цена": 1790,
+    "Мощность (Вт)": 2000,
+    "Объём (л)": 1.7,
+    "Материал": "стекло",
+    "Цвет": "прозрачный",
+    "Тип": "электрический",
+    "источник": "Yandex Market",
+    "итоговый_балл": 0.5538,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.8461538461538461
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.6542056074766355
+      },
+      "iteration_Yandex Market": {
+        "role": "reference",
+        "score": 0.19999999999999996
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.6862745098039216
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.38235294117647056
+      }
+    }
+  },
+  {
+    "Артикул": "K011",
+    "Бренд": "Midea",
+    "Модель": "MK-17S15A",
+    "Цена": 1890,
+    "Мощность (Вт)": 1800,
+    "Объём (л)": 1.5,
+    "Материал": "пластик",
+    "Цвет": "синий",
+    "Тип": "электрический",
+    "источник": "Ozon",
+    "итоговый_балл": 0.5514,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.7272727272727273
+      },
+      "iteration_Ozon": {
+        "role": "reference",
+        "score": 0.5714285714285714
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.5981308411214953
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.56
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.30000000000000004
+      }
+    }
+  },
+  {
+    "Артикул": "K020",
+    "Бренд": "Electrolux",
+    "Модель": "EEK3A",
+    "Цена": 4990,
+    "Мощность (Вт)": 2400,
+    "Объём (л)": 1.7,
+    "Материал": "металл",
+    "Цвет": "чёрный",
+    "Тип": "электрический",
+    "источник": "Ozon",
+    "итоговый_балл": 0.5488,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.7884615384615384
+      },
+      "iteration_Ozon": {
+        "role": "reference",
+        "score": 0.1428571428571429
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.7037037037037037
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.8118811881188119
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.29702970297029707
+      }
+    }
+  },
+  {
+    "Артикул": "K013",
+    "Бренд": "Scarlett",
+    "Модель": "SC-EK27S15",
+    "Цена": 1690,
+    "Мощность (Вт)": 2000,
+    "Объём (л)": 1.5,
+    "Материал": "пластик",
+    "Цвет": "красный",
+    "Тип": "электрический",
+    "источник": "Wildberries",
+    "итоговый_балл": 0.541,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "reference",
+        "score": 0.5
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.7567567567567568
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.6371681415929203
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.5849056603773585
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.22641509433962265
+      }
+    }
+  },
+  {
+    "Артикул": "K006",
+    "Бренд": "Redmond",
+    "Модель": "SkyKettle M80S",
+    "Цена": 4490,
+    "Мощность (Вт)": 2400,
+    "Объём (л)": 1.8,
+    "Материал": "металл",
+    "Цвет": "чёрный",
+    "Тип": "умный",
+    "источник": "Yandex Market",
+    "итоговый_балл": 0.5403,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.5294117647058824
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.5436893203883495
+      },
+      "iteration_Yandex Market": {
+        "role": "reference",
+        "score": 0.8
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.5858585858585859
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.24242424242424243
+      }
+    }
+  },
+  {
+    "Артикул": "K025",
+    "Бренд": "Tefal",
+    "Модель": "KI243840",
+    "Цена": 3290,
+    "Мощность (Вт)": 2400,
+    "Объём (л)": 1.7,
+    "Материал": "стекло",
+    "Цвет": "прозрачный",
+    "Тип": "электрический",
+    "источник": "Wildberries",
+    "итоговый_балл": 0.5241,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "reference",
+        "score": 0.0
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.7547169811320755
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.8073394495412844
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.6796116504854369
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.3786407766990291
+      }
+    }
+  },
+  {
+    "Артикул": "K018",
+    "Бренд": "Samsung",
+    "Модель": "SK18T",
+    "Цена": 5490,
+    "Мощность (Вт)": 2400,
+    "Объём (л)": 1.8,
+    "Материал": "металл",
+    "Цвет": "серебристый",
+    "Тип": "электрический",
+    "источник": "other",
+    "итоговый_балл": 0.5168,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.7636363636363637
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.7652173913043478
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.7636363636363637
+      },
+      "iteration_other": {
+        "role": "reference",
+        "score": 0.0
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.2912621359223301
+      }
+    }
+  },
+  {
+    "Артикул": "K004",
+    "Бренд": "Xiaomi",
+    "Модель": "Mijia 1.7L",
+    "Цена": 3490,
+    "Мощность (Вт)": 1800,
+    "Объём (л)": 1.7,
+    "Материал": "стекло",
+    "Цвет": "белый",
+    "Тип": "умный",
+    "источник": "Wildberries",
+    "итоговый_балл": 0.4986,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "reference",
+        "score": 0.875
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.4897959183673469
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.44
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.3655913978494624
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.3225806451612903
+      }
+    }
+  },
+  {
+    "Артикул": "K024",
+    "Бренд": "Moulinex",
+    "Модель": "BY150D30",
+    "Цена": 3690,
+    "Мощность (Вт)": 2200,
+    "Объём (л)": 1.7,
+    "Материал": "металл",
+    "Цвет": "красный",
+    "Тип": "электрический",
+    "источник": "Yandex Market",
+    "итоговый_балл": 0.496,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.7090909090909091
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.7222222222222222
+      },
+      "iteration_Yandex Market": {
+        "role": "reference",
+        "score": 0.0
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.7572815533980582
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.2912621359223301
+      }
+    }
+  },
+  {
+    "Артикул": "K015",
+    "Бренд": "Smeg",
+    "Модель": "KLF03",
+    "Цена": 18990,
+    "Мощность (Вт)": 2400,
+    "Объём (л)": 1.7,
+    "Материал": "металл",
+    "Цвет": "пастельный",
+    "Тип": "стильный",
+    "источник": "Yandex Market",
+    "итоговый_балл": 0.4937,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.5773195876288659
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.5656565656565656
+      },
+      "iteration_Yandex Market": {
+        "role": "reference",
+        "score": 0.4
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.574468085106383
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.35106382978723405
+      }
+    }
+  },
+  {
+    "Артикул": "K019",
+    "Бренд": "Clatronic",
+    "Модель": "WKA 3377",
+    "Цена": 1490,
+    "Мощность (Вт)": 1800,
+    "Объём (л)": 1.5,
+    "Материал": "пластик",
+    "Цвет": "белый",
+    "Тип": "электрический",
+    "источник": "Wildberries",
+    "итоговый_балл": 0.4931,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "reference",
+        "score": 0.25
+      },
+      "iteration_Ozon": {
+        "role": "compared",
+        "score": 0.7037037037037037
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.5504587155963303
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.5825242718446602
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.3786407766990291
+      }
+    }
+  },
+  {
+    "Артикул": "K017",
+    "Бренд": "BBK",
+    "Модель": "K1951S",
+    "Цена": 1990,
+    "Мощность (Вт)": 1850,
+    "Объём (л)": 1.5,
+    "Материал": "пластик",
+    "Цвет": "чёрный",
+    "Тип": "электрический",
+    "источник": "Ozon",
+    "итоговый_балл": 0.4818,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.6796116504854369
+      },
+      "iteration_Ozon": {
+        "role": "reference",
+        "score": 0.2857142857142857
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.5686274509803921
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.625
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.25
+      }
+    }
+  },
+  {
+    "Артикул": "K023",
+    "Бренд": "Maxwell",
+    "Модель": "MW-1756",
+    "Цена": 1590,
+    "Мощность (Вт)": 2000,
+    "Объём (л)": 1.5,
+    "Материал": "пластик",
+    "Цвет": "чёрный",
+    "Тип": "электрический",
+    "источник": "Ozon",
+    "итоговый_балл": 0.4529,
+    "отладка": {
+      "iteration_Wildberries": {
+        "role": "compared",
+        "score": 0.7567567567567568
+      },
+      "iteration_Ozon": {
+        "role": "reference",
+        "score": 0.0
+      },
+      "iteration_Yandex Market": {
+        "role": "compared",
+        "score": 0.616822429906542
+      },
+      "iteration_other": {
+        "role": "compared",
+        "score": 0.6534653465346535
+      },
+      "description": {
+        "role": "description_match",
+        "score": 0.2376237623762376
+      }
+    }
+  }
+]
