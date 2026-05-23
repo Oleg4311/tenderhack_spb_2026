@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import re
 from urllib.parse import quote_plus, urlparse
 
 from app.parsers.browser import fetch_rendered_html
+
+logger = logging.getLogger(__name__)
 from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price, normalize_url
 from app.parsers.extractors import extract_characteristics_from_json, extract_embedded_json, extract_product_from_html, extract_product_links
 from app.parsers.http_client import Fetcher, browser_headers
@@ -25,8 +28,10 @@ class OzonParser:
         _blocked_reason = ""
         async with Fetcher() as fetcher:
             composer = await self._composer_search(fetcher, query)
+            logger.info("[ozon] composer_found=%s", composer is not None)
             if composer:
                 items = self._items_from_json(composer, region, category, limit)
+                logger.info("[ozon] composer_items=%d", len(items))
 
             resp = None
             if not items:
@@ -74,6 +79,7 @@ class OzonParser:
                         errorReason=_blocked_reason or "Ozon anti-bot — browser fallback failed",
                         diagnostics={"operatorAction": "configure PROXY_URL env variable to access Ozon"},
                     )
+                logger.info("[ozon] browser_status=%s xhr_payloads=%d html_len=%d", rendered.status if rendered else "none", len(rendered.product_payloads) if rendered else 0, len(rendered.html or "") if rendered else 0)
                 if rendered.status == "blocked" and not rendered.product_payloads:
                     return SourceResult(
                         self.source,

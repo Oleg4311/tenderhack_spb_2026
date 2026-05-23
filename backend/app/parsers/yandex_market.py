@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import re
 from urllib.parse import quote_plus
 
 from app.parsers.browser import fetch_rendered_html
+
+logger = logging.getLogger(__name__)
 from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price, normalize_url
 from app.parsers.extractors import extract_characteristics_from_json, extract_embedded_json, extract_product_from_html, extract_product_links
 from app.parsers.http_client import Fetcher, browser_headers
@@ -74,6 +77,7 @@ class YandexMarketParser:
                         errorReason=_blocked_reason or "Yandex Market anti-bot — browser fallback failed",
                         diagnostics={"operatorAction": "configure PROXY_URL env variable"},
                     )
+                logger.info("[ym] browser_status=%s xhr_payloads=%d html_len=%d", rendered.status if rendered else "none", len(rendered.product_payloads) if rendered else 0, len(rendered.html or "") if rendered else 0)
                 if rendered.status == "blocked" and not rendered.product_payloads:
                     return SourceResult(
                         self.source,

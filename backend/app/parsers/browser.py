@@ -7,9 +7,29 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from app.parsers.common import detect_blocked_page
-from app.parsers.http_client import USER_AGENTS
+from app.parsers.http_client import USER_AGENTS, proxy_manager
 
 logger = logging.getLogger(__name__)
+
+# Локальный OCR для простых текстовых капч (без внешних API)
+try:
+    import ddddocr as _ddddocr
+    _ocr = _ddddocr.DdddOcr(show_ad=False)
+    _HAS_OCR = True
+except Exception:
+    _ocr = None
+    _HAS_OCR = False
+
+
+def solve_local_captcha(image_bytes: bytes) -> str:
+    """Решает простую текстовую капчу локально через ddddocr (ONNX-модель, без интернета)."""
+    if not _HAS_OCR or not image_bytes:
+        return ""
+    try:
+        return _ocr.classification(image_bytes)
+    except Exception:
+        return ""
+
 
 _playwright = None
 _browser = None
@@ -215,8 +235,10 @@ async def get_browser():
         except ModuleNotFoundError as exc:
             raise RuntimeError("Playwright is not installed in this runtime image") from exc
         _playwright = await async_playwright().start()
+        _chromium_path = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH") or None
         _browser = await _playwright.chromium.launch(
-            headless=True,
+            headless="new",  # режим "new" хуже детектируется чем headless=True
+            executable_path=_chromium_path,
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
@@ -244,10 +266,7 @@ async def get_browser():
 
 
 def _browser_proxy() -> dict | None:
-    proxy = os.getenv("PROXY_URL")
-    if not proxy:
-        proxies = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
-        proxy = random.choice(proxies) if proxies else ""
+    proxy = proxy_manager.get()
     return {"server": proxy} if proxy else None
 
 
@@ -353,9 +372,16 @@ async def fetch_rendered_html(
 
             await page.route("**/*", route_handler)
 
+            _API_URL_MARKERS = (
+                "/search", "/catalog", "/products", "/cards", "/api/",
+                "json", "ajax", "graphql", "search.wb.ru", "/composer",
+            )
+
             async def on_response(response):
                 ctype = response.headers.get("content-type", "")
-                if "json" not in ctype:
+                resp_url = response.url
+                is_api = any(m in resp_url for m in _API_URL_MARKERS)
+                if "json" not in ctype and not is_api:
                     return
                 try:
                     data = await response.json()

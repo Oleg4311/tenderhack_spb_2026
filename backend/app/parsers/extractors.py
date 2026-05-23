@@ -135,6 +135,37 @@ def extract_embedded_json(html: str) -> list[Any]:
     return out
 
 
+_PRODUCT_NAME_KEYS = {"name", "title", "goodsName", "productName", "displayName"}
+_PRODUCT_PRICE_KEYS = {"price", "salePrice", "finalPrice", "priceU", "currentPrice", "cardPrice", "priceValue"}
+_PRODUCT_ID_KEYS = {"id", "sku", "nmId", "productId", "skuId", "wareId", "articleId"}
+_PRODUCT_URL_KEYS = {"url", "link", "productUrl", "href", "detailUrl"}
+
+
+def looks_like_product(obj: dict) -> bool:
+    keys = set(obj.keys())
+    has_name = bool(keys & _PRODUCT_NAME_KEYS)
+    has_price = bool(keys & _PRODUCT_PRICE_KEYS)
+    has_id = bool(keys & _PRODUCT_ID_KEYS)
+    has_url = bool(keys & _PRODUCT_URL_KEYS)
+    return has_name and (has_price or has_id or has_url)
+
+
+def find_products_in_json(data: Any, _depth: int = 0, _max: int = 14) -> list[dict]:
+    if _depth > _max:
+        return []
+    results: list[dict] = []
+    if isinstance(data, dict):
+        if looks_like_product(data):
+            results.append(data)
+        else:
+            for v in data.values():
+                results.extend(find_products_in_json(v, _depth + 1, _max))
+    elif isinstance(data, list):
+        for item in data[:500]:
+            results.extend(find_products_in_json(item, _depth + 1, _max))
+    return results
+
+
 def _add_char(chars: dict[str, Any], key: Any, value: Any) -> None:
     key_text = clean_text(key)
     if not key_text or len(key_text) > 80:

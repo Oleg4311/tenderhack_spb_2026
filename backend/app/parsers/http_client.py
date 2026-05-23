@@ -1,4 +1,5 @@
 import asyncio
+import json as _json
 import logging
 import os
 import random
@@ -24,6 +25,8 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
 ]
 
 REFERERS = {
@@ -33,7 +36,67 @@ REFERERS = {
     "runet": "https://www.google.com/",
 }
 
-_IMPERSONATE_PROFILES = ["chrome124", "chrome120", "chrome110"]
+# Набор TLS-профилей: разные браузеры, разные версии — снижаем вероятность блокировки по JA3/JA4
+_IMPERSONATE_PROFILES = [
+    "chrome124", "chrome120", "chrome110", "chrome101",
+    "firefox117",
+    "safari15_5",
+]
+
+# Коды ответов, при которых прокси уходит в cooldown
+_PROXY_BAN_CODES = {403, 407, 429, 451}
+_PROXY_COOLDOWN_SEC = 600  # 10 минут
+
+
+class ProxyManager:
+    """Менеджер пула прокси с отслеживанием здоровья и cooldown'ом."""
+
+    def __init__(self) -> None:
+        self._proxies: list[str] = self._load_proxies()
+        self._cooldown: dict[str, float] = {}
+        self._failures: dict[str, int] = {}
+
+    def _load_proxies(self) -> list[str]:
+        result: list[str] = []
+        url = os.getenv("PROXY_URL", "").strip()
+        if url:
+            result.append(url)
+        for p in os.getenv("PROXY_LIST", "").split(","):
+            p = p.strip()
+            if p and p not in result:
+                result.append(p)
+        return result
+
+    def get(self) -> str | None:
+        if not self._proxies:
+            return None
+        now = time.monotonic()
+        active = [p for p in self._proxies if self._cooldown.get(p, 0) < now]
+        if active:
+            return random.choice(active)
+        # Все в cooldown — возвращаем тот, у кого cooldown заканчивается раньше
+        return min(self._proxies, key=lambda p: self._cooldown.get(p, 0))
+
+    def report_success(self, proxy: str | None) -> None:
+        if proxy:
+            self._failures.pop(proxy, None)
+            self._cooldown.pop(proxy, None)
+
+    def report_failure(self, proxy: str | None, status_code: int = 0) -> None:
+        if not proxy:
+            return
+        self._failures[proxy] = self._failures.get(proxy, 0) + 1
+        ban = status_code in _PROXY_BAN_CODES or self._failures[proxy] >= 3
+        if ban:
+            until = time.monotonic() + _PROXY_COOLDOWN_SEC
+            self._cooldown[proxy] = until
+            logger.info("[proxy] cooldown=%s status=%d fails=%d", proxy, status_code, self._failures[proxy])
+
+    def has_proxies(self) -> bool:
+        return bool(self._proxies)
+
+
+proxy_manager = ProxyManager()
 
 
 @dataclass
@@ -45,6 +108,7 @@ class FetchResponse:
     blocked: bool = False
     error: str = ""
     elapsed_ms: int = 0
+    proxy_used: str = ""
 
 
 class DomainRateLimiter:
@@ -64,14 +128,6 @@ class DomainRateLimiter:
 
 
 rate_limiter = DomainRateLimiter()
-
-
-def _proxy_config() -> str | None:
-    proxy_url = os.getenv("PROXY_URL")
-    if proxy_url:
-        return proxy_url
-    proxy_list = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
-    return random.choice(proxy_list) if proxy_list else None
 
 
 def browser_headers(referer: str = "", source: str = "") -> dict[str, str]:
@@ -110,13 +166,15 @@ def _decode_text(content: bytes, declared_text: str) -> str:
 
 
 class Fetcher:
+    """HTTP-клиент с curl_cffi (TLS-имперсонация Chrome/Firefox/Safari) + ротацией прокси."""
+
     def __init__(self):
-        proxy = _proxy_config()
-        self._proxy = proxy
+        self._proxy = proxy_manager.get()
+        # Каждый экземпляр получает случайный TLS-профиль — разные профили = разные JA3/JA4
         self._profile = random.choice(_IMPERSONATE_PROFILES)
 
         if _HAS_CURL:
-            proxies = {"https": proxy, "http": proxy} if proxy else None
+            proxies = {"https": self._proxy, "http": self._proxy} if self._proxy else None
             self._curl: CurlSession = CurlSession(
                 impersonate=self._profile,
                 proxies=proxies,
@@ -130,8 +188,8 @@ class Fetcher:
                 "headers": browser_headers(),
                 "http2": False,
             }
-            if proxy:
-                kwargs["proxy"] = proxy
+            if self._proxy:
+                kwargs["proxy"] = self._proxy
             self._httpx: httpx.AsyncClient = httpx.AsyncClient(**kwargs)
 
     async def get_text(self, url: str, *, source: str = "", headers: dict | None = None,
@@ -145,7 +203,6 @@ class Fetcher:
                                    params=params, retries=retries, referer=referer)
         if resp.text and resp.json_data is None:
             try:
-                import json as _json
                 resp.json_data = _json.loads(resp.text)
             except Exception:
                 pass
@@ -157,7 +214,7 @@ class Fetcher:
         params = kwargs.get("params")
         retries = min(int(kwargs.get("retries", 2)), 2)
         domain = urlparse(url).netloc or "unknown"
-        last = FetchResponse(url=url)
+        last = FetchResponse(url=url, proxy_used=self._proxy or "")
 
         if params:
             url = url + ("&" if "?" in url else "?") + urlencode(params)
@@ -172,8 +229,20 @@ class Fetcher:
                 else:
                     last = await self._httpx_request(method, url, headers, started)
 
+                last.proxy_used = self._proxy or ""
+
                 if last.status_code < 400 and not last.blocked:
+                    proxy_manager.report_success(self._proxy)
                     return last
+
+                if last.status_code in _PROXY_BAN_CODES:
+                    proxy_manager.report_failure(self._proxy, last.status_code)
+                    # Пробуем сменить прокси на следующей попытке
+                    new_proxy = proxy_manager.get()
+                    if new_proxy and new_proxy != self._proxy:
+                        self._proxy = new_proxy
+                        await self._rebuild_client()
+
                 if last.status_code not in {403, 408, 429, 500, 502, 503, 504}:
                     return last
                 if attempt < retries:
@@ -182,11 +251,29 @@ class Fetcher:
             except Exception as exc:
                 logger.debug("[HTTP] %s %s attempt=%d error=%s", method, url, attempt, exc)
                 last = FetchResponse(url=url, error=type(exc).__name__,
-                                     elapsed_ms=int((time.perf_counter() - started) * 1000))
+                                     elapsed_ms=int((time.perf_counter() - started) * 1000),
+                                     proxy_used=self._proxy or "")
                 if attempt < retries:
                     await asyncio.sleep((2 ** attempt) + random.uniform(0.2, 0.8))
 
         return last
+
+    async def _rebuild_client(self) -> None:
+        """Пересобирает curl_cffi сессию с новым прокси после ротации."""
+        if not _HAS_CURL:
+            return
+        try:
+            await self._curl.close()
+        except Exception:
+            pass
+        proxies = {"https": self._proxy, "http": self._proxy} if self._proxy else None
+        self._profile = random.choice(_IMPERSONATE_PROFILES)
+        self._curl = CurlSession(
+            impersonate=self._profile,
+            proxies=proxies,
+            allow_redirects=True,
+            max_redirects=5,
+        )
 
     async def _curl_request(self, method: str, url: str, headers: dict, started: float) -> FetchResponse:
         response = await self._curl.request(method, url, headers=headers, timeout=20)
@@ -202,7 +289,6 @@ class Fetcher:
         ctype = response.headers.get("content-type", "")
         if "json" in ctype or text.lstrip()[:1] in "{[":
             try:
-                import json as _json
                 resp.json_data = _json.loads(text)
             except Exception:
                 pass
@@ -228,9 +314,15 @@ class Fetcher:
 
     async def close(self) -> None:
         if _HAS_CURL:
-            await self._curl.close()
+            try:
+                await self._curl.close()
+            except Exception:
+                pass
         else:
-            await self._httpx.aclose()
+            try:
+                await self._httpx.aclose()
+            except Exception:
+                pass
 
     async def __aenter__(self):
         return self

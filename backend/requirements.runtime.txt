@@ -9,3 +9,4 @@ rapidfuzz==3.10.1
 python-multipart==0.0.12
 pymorphy3==2.0.2
 trafilatura==1.12.2
+ddddocr==1.6.1

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 import re
 from urllib.parse import quote_plus, urlparse
@@ -6,11 +7,13 @@ from xml.etree import ElementTree
 
 from app.parsers.browser import fetch_rendered_html
 from app.parsers.common import ProductItem, SourceResult, clean_text, default_geo, normalize_price
-from app.parsers.extractors import extract_product_from_html, extract_product_links
+from app.parsers.extractors import extract_product_from_html, extract_product_links, find_products_in_json
 from app.parsers.http_client import Fetcher, browser_headers
 
+logger = logging.getLogger(__name__)
+
 SITE_POOL = {
-    "tires": ["4tochki.ru", "autoopt.ru", "shina-guide.ru", "tyres-auto.ru"],
+    "tires": ["4tochki.ru", "autoopt.ru", "kolesa.ru", "shinexp.ru"],
     "office": ["foroffice.ru", "oldi.ru", "price.ru", "komus.ru"],
     "clothes": ["zolla.com", "sportmaster.ru", "kari.com"],
 }
@@ -107,11 +110,27 @@ ADAPTERS = {
         "allow": ["/catalog/", "/product/", "/item/"],
         "seller": "АвтоОпт",
     },
+    "kolesa.ru": {
+        "search": [
+            "https://kolesa.ru/tyres/?q={q}",
+            "https://kolesa.ru/tyres/?search={q}",
+        ],
+        "allow": ["/tyres/", "/shiny/", "/product/"],
+        "seller": "kolesa.ru",
+    },
+    "shinexp.ru": {
+        "search": [
+            "https://shinexp.ru/search/?q={q}",
+            "https://shinexp.ru/catalog/?q={q}",
+        ],
+        "allow": ["/catalog/", "/product/", "/item/"],
+        "seller": "ShineXP",
+    },
 }
 
 
 # Sites that always block plain HTTP — go straight to Playwright, skip the failed HTTP round-trip.
-BROWSER_FIRST_HOSTS = {"sportmaster.ru", "kari.com"}
+BROWSER_FIRST_HOSTS = {"sportmaster.ru", "kari.com", "4tochki.ru"}
 
 
 class RunetParser:
@@ -120,6 +139,7 @@ class RunetParser:
     async def search(self, query: str, region: str = "Москва", limit: int = 10, category: str = "tires") -> SourceResult:
         hosts = SITE_POOL.get(category, SITE_POOL["tires"])
         per_host = max(1, limit // max(1, len(hosts)) + 1)
+        logger.info("[runet] query=%r category=%s hosts=%s", query, category, hosts)
         async with Fetcher() as fetcher:
             tasks = [
                 asyncio.wait_for(
@@ -130,10 +150,14 @@ class RunetParser:
             ]
             chunks = await asyncio.gather(*tasks, return_exceptions=True)
         items: list[ProductItem] = []
-        for chunk in chunks:
+        for host, chunk in zip(hosts, chunks):
             if isinstance(chunk, list):
+                logger.info("[runet] host=%s found=%d", host, len(chunk))
                 items.extend(chunk)
+            elif isinstance(chunk, Exception):
+                logger.info("[runet] host=%s error=%s", host, type(chunk).__name__)
         items = self._dedupe(items)[:limit]
+        logger.info("[runet] total_items=%d", len(items))
         return SourceResult(self.source, "ok" if items else "empty", len(items), "", items)
 
     async def _search_host(self, fetcher: Fetcher, host: str, query: str, region: str, category: str, limit: int) -> list[ProductItem]:
@@ -180,16 +204,24 @@ class RunetParser:
                             wait_selectors=['a[href*="/catalog/"]', 'a[href*="/product"]', ".product", ".item", "article"],
                             scroll_steps=2,
                         ),
-                        timeout=12,
+                        timeout=14,
                     )
                 except Exception:
                     rendered = None
-                if rendered and rendered.status == "ok":
+                if rendered:
                     html = rendered.html or ""
-                elif rendered and rendered.product_payloads:
-                    # XHR capture hit — extract links from payloads later
-                    html = rendered.html or ""
+                    # XHR-first: extract products directly from captured API payloads
+                    if rendered.product_payloads:
+                        logger.info("[runet] host=%s xhr_payloads=%d", host, len(rendered.product_payloads))
+                        for payload in rendered.product_payloads:
+                            for raw in find_products_in_json(payload)[:limit]:
+                                item = self._item_from_raw(raw, host, base_url, region, category, adapter)
+                                if item:
+                                    items.append(item)
+                        if items:
+                            return items[:limit]
             links = self._filter_links(extract_product_links(html, url), host, adapter)
+            logger.info("[runet] host=%s pattern=%s html_links=%d", host, url, len(links))
             if links:
                 break
         if not links:
@@ -249,6 +281,39 @@ class RunetParser:
             if len(items) >= limit:
                 break
         return items
+
+    def _item_from_raw(self, raw: dict, host: str, base_url: str, region: str, category: str, adapter: dict) -> ProductItem | None:
+        from app.parsers.common import normalize_url
+        title = (raw.get("name") or raw.get("title") or raw.get("goodsName") or raw.get("displayName") or "").strip()
+        if not title:
+            return None
+        price = normalize_price(raw.get("price") or raw.get("salePrice") or raw.get("finalPrice") or raw.get("priceValue") or 0)
+        link = raw.get("url") or raw.get("link") or raw.get("productUrl") or raw.get("href") or ""
+        if link:
+            link = normalize_url(link, base_url)
+        image = raw.get("image") or raw.get("imageUrl") or raw.get("picture") or raw.get("img") or ""
+        if image and not image.startswith("http"):
+            image = normalize_url(image, base_url)
+        brand = (raw.get("brand") or raw.get("brandName") or "")
+        if isinstance(brand, dict):
+            brand = brand.get("name") or ""
+        item = ProductItem(
+            source=self.source,
+            sourceType="runet",
+            realSourceHost=host,
+            title=clean_text(title),
+            brand=clean_text(brand),
+            price=price,
+            url=link,
+            mainImage=str(image),
+            images=[str(image)] if image else [],
+            category=category,
+            region=region,
+            geo=default_geo(region),
+        )
+        if adapter.get("seller") and not item.seller:
+            item.seller = adapter["seller"]
+        return item
 
     def _apply_host_adapter(self, item: ProductItem, html: str, adapter: dict) -> None:
         text = clean_text(re.sub(r"<[^>]+>", " ", html or ""))

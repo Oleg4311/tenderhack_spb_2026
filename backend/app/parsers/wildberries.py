@@ -1,7 +1,10 @@
 import asyncio
+import logging
 from urllib.parse import quote_plus
 
 from app.parsers.browser import fetch_rendered_html
+
+logger = logging.getLogger(__name__)
 from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price
 from app.parsers.extractors import extract_characteristics_from_json, extract_embedded_json, extract_product_from_html, extract_product_links
 from app.parsers.http_client import Fetcher, json_headers
@@ -77,6 +80,7 @@ class WildberriesParser:
                     blocked_reason = f"HTTP {resp.status_code}: blocked by Wildberries"
                     continue
                 products = ((resp.json_data or {}).get("data") or {}).get("products") or []
+                logger.info("[wb] endpoint=%s status=%d products=%d", endpoint, resp.status_code, len(products))
                 for raw in products[:limit]:
                     item = self._from_search_product(raw, region, category)
                     if item:
@@ -121,6 +125,7 @@ class WildberriesParser:
                         "triedEndpoints": SEARCH_ENDPOINTS[:2],
                     } if blocked_reason else {},
                 )
+            logger.info("[wb] browser_status=%s xhr_payloads=%d", rendered.status if rendered else "none", len(rendered.product_payloads) if rendered else 0)
             # Extract from XHR-captured WB API payloads (most reliable path)
             for payload in rendered.product_payloads or []:
                 wb_products = ((payload or {}).get("data") or {}).get("products") or []
