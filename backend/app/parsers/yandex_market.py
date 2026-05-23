@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 from urllib.parse import quote_plus
 
 from app.parsers.browser import fetch_rendered_html
@@ -10,7 +9,6 @@ from app.parsers.extractors import (
     extract_dom_cards,
     extract_embedded_json,
     extract_product_from_html,
-    extract_product_links,
     find_products_in_json,
 )
 from app.parsers.http_client import Fetcher, browser_headers
@@ -31,9 +29,33 @@ class YandexMarketParser:
         items: list[ProductItem] = []
         blocked_reason = ""
         candidate_html = ""
+        rendered = None
 
-        # ── 1. Browser-first with proxy (YM blocks VPN IPs via HTTP, browser may pass) ──
-        for _use_proxy in [True, False]:
+        # ── 1. HTTP direct (no proxy) — fast, YM often allows direct connections ──
+        async with Fetcher(use_proxy=False) as fetcher:
+            headers = browser_headers(source=self.source)
+            headers["Cookie"] = f"_region_id={rid}; yandex_gid={rid}; my={rid};"
+            try:
+                resp = await asyncio.wait_for(
+                    fetcher.get_text(search_url, source=self.source, headers=headers, retries=0),
+                    timeout=8,
+                )
+            except Exception as exc:
+                blocked_reason = f"HTTP error: {type(exc).__name__}"
+                resp = None
+            if resp and resp.text and not resp.blocked:
+                candidate_html = resp.text
+                logger.info("[source=ym] http_direct status=%d len=%d", resp.status_code, len(resp.text))
+                for data in extract_embedded_json(candidate_html):
+                    items.extend(self._items_from_json(data, region, category, limit - len(items)))
+                    if len(items) >= limit:
+                        break
+                logger.info("[source=ym] http_direct_products=%d", len(items))
+            elif resp:
+                blocked_reason = f"HTTP {resp.status_code}: YM anti-bot / VPN flag"
+
+        # ── 2. Browser WITHOUT proxy (single attempt, 25s) ────────────────────
+        if not items:
             try:
                 rendered = await asyncio.wait_for(
                     fetch_rendered_html(
@@ -45,22 +67,19 @@ class YandexMarketParser:
                             'article', '[data-auto*="product" i]', 'a[href*="/product"]',
                         ],
                         scroll_steps=3,
-                        use_proxy=_use_proxy,
+                        use_proxy=False,
                     ),
-                    timeout=35,
+                    timeout=28,
                 )
             except asyncio.TimeoutError:
                 rendered = None
-                blocked_reason = f"browser timeout (use_proxy={_use_proxy})"
-                continue
+                blocked_reason = blocked_reason or "browser timeout"
             except Exception as exc:
                 rendered = None
-                blocked_reason = f"browser error: {type(exc).__name__}"
-                continue
+                blocked_reason = blocked_reason or f"browser error: {type(exc).__name__}"
 
             logger.info(
-                "[source=ym] use_proxy=%s page_loaded=%s xhr_payloads=%d xhr_product_payloads=%d status=%s",
-                _use_proxy,
+                "[source=ym] page_loaded=%s xhr_payloads=%d xhr_product_payloads=%d status=%s",
                 rendered.page_loaded if rendered else False,
                 rendered.xhr_payloads if rendered else 0,
                 rendered.xhr_product_payloads if rendered else 0,
@@ -68,39 +87,33 @@ class YandexMarketParser:
             )
 
             if rendered and rendered.status != "blocked":
-                candidate_html = rendered.html or ""
-                break
-            if rendered:
-                blocked_reason = rendered.errorReason or f"blocked (use_proxy={_use_proxy})"
+                candidate_html = rendered.html or candidate_html
 
-        # ── 2. XHR product payloads ───────────────────────────────────────────
-        if rendered and rendered.product_payloads:
-            for payload in rendered.product_payloads:
-                items.extend(self._items_from_json(payload, region, category, limit - len(items)))
-                if len(items) >= limit:
-                    break
-            logger.info("[source=ym] json_products=%d (from XHR)", len(items))
+            # XHR product payloads
+            if rendered and rendered.product_payloads:
+                for payload in rendered.product_payloads:
+                    items.extend(self._items_from_json(payload, region, category, limit - len(items)))
+                    if len(items) >= limit:
+                        break
+                logger.info("[source=ym] json_products=%d (from XHR)", len(items))
 
-        # ── 3. Embedded JSON (__NEXT_DATA__ etc.) ─────────────────────────────
-        embedded_products = 0
-        if not items and candidate_html:
-            for data in extract_embedded_json(candidate_html):
-                items.extend(self._items_from_json(data, region, category, limit - len(items)))
-                if len(items) >= limit:
-                    break
-            embedded_products = len(items)
-            logger.info("[source=ym] embedded_products=%d", embedded_products)
+            # Embedded JSON from browser HTML
+            if not items and candidate_html:
+                for data in extract_embedded_json(candidate_html):
+                    items.extend(self._items_from_json(data, region, category, limit - len(items)))
+                    if len(items) >= limit:
+                        break
+                logger.info("[source=ym] embedded_products=%d", len(items))
 
-        # ── 4. DOM card fallback ───────────────────────────────────────────────
-        dom_cards = 0
+            if rendered and rendered.status == "blocked":
+                blocked_reason = blocked_reason or rendered.errorReason or "blocked (browser)"
+
+        # ── 3. DOM card fallback ───────────────────────────────────────────────
         if not items and candidate_html:
             cards = extract_dom_cards(candidate_html, "https://market.yandex.ru/")
-            dom_cards = len(cards)
             for card in cards[:limit]:
                 if card.get("title") and (card.get("price") or card.get("url")):
-                    url = card["url"] or ""
-                    if url and not url.startswith("https://market.yandex.ru"):
-                        url = normalize_url(url, "https://market.yandex.ru/")
+                    url = normalize_url(card["url"] or "", "https://market.yandex.ru/")
                     item = ProductItem(
                         source=self.source, sourceType="marketplace", realSourceHost="market.yandex.ru",
                         title=card["title"], price=card["price"],
@@ -112,34 +125,13 @@ class YandexMarketParser:
                         geo=default_geo(region) | {"detectedRegion": region},
                     )
                     items.append(item)
-            logger.info("[source=ym] dom_cards=%d", dom_cards)
+            logger.info("[source=ym] dom_cards=%d", len(items))
 
-        # ── 5. HTTP fallback ───────────────────────────────────────────────────
-        if not items:
-            logger.info("[source=ym] trying HTTP fallback")
-            async with Fetcher() as fetcher:
-                headers = browser_headers(source=self.source)
-                headers["Cookie"] = f"_region_id={rid}; yandex_gid={rid};"
-                for url in [search_url]:
-                    try:
-                        resp = await asyncio.wait_for(
-                            fetcher.get_text(url, source=self.source, headers=headers, retries=0),
-                            timeout=12,
-                        )
-                    except Exception as exc:
-                        blocked_reason = blocked_reason or f"HTTP error: {type(exc).__name__}"
-                        continue
-                    if resp.text and not resp.blocked:
-                        candidate_html = resp.text
-                        for data in extract_embedded_json(candidate_html):
-                            items.extend(self._items_from_json(data, region, category, limit - len(items)))
-                        break
-                    blocked_reason = blocked_reason or f"HTTP {resp.status_code}: YM anti-bot / VPN flag"
-
-        # ── 6. Product links fallback ─────────────────────────────────────────
+        # ── 4. Product links fallback ─────────────────────────────────────────
         if not items and candidate_html:
+            from app.parsers.extractors import extract_product_links
             links = extract_product_links(candidate_html, "https://market.yandex.ru/")
-            async with Fetcher() as fetcher:
+            async with Fetcher(use_proxy=False) as fetcher:
                 for link in links[:limit]:
                     try:
                         detail = await asyncio.wait_for(
@@ -153,14 +145,15 @@ class YandexMarketParser:
         normalized_products = len(items)
         logger.info("[source=ym] normalized_products=%d", normalized_products)
 
-        # ── 7. Detail enrichment ──────────────────────────────────────────────
-        async with Fetcher() as fetcher:
-            for idx, item in enumerate(items[: min(limit, 3)]):
-                try:
-                    detail = await asyncio.wait_for(self._detail(fetcher, item.url, region, category), timeout=5)
-                except Exception:
-                    detail = None
-                items[idx] = merge_product_data(item, detail)
+        # ── 5. Detail enrichment — only when fast HTTP path was used ─────────
+        if items and rendered is None:
+            async with Fetcher(use_proxy=False) as fetcher:
+                for idx, item in enumerate(items[: min(limit, 2)]):
+                    try:
+                        detail = await asyncio.wait_for(self._detail(fetcher, item.url, region, category), timeout=4)
+                    except Exception:
+                        detail = None
+                    items[idx] = merge_product_data(item, detail)
 
         items = self._dedupe(items)[:limit]
         relevant = len([i for i in items if i.title and i.price])
@@ -173,15 +166,14 @@ class YandexMarketParser:
                 errorReason=reason,
                 diagnostics={
                     "blockedUrl": search_url,
-                    "legalFallbacksTried": ["browser_proxy", "browser_direct", "embedded_json", "dom_cards", "http"],
-                    "operatorAction": "Yandex Market detects VPN — try residential proxy",
+                    "legalFallbacksTried": ["http_direct", "browser_direct", "embedded_json", "dom_cards"],
+                    "operatorAction": "Yandex Market detects VPN/datacenter — try residential proxy",
                 } if blocked_reason else {},
             )
         return SourceResult(self.source, "ok", len(items), "", items)
 
     def _items_from_json(self, data, region: str, category: str, limit: int) -> list[ProductItem]:
         out: list[ProductItem] = []
-        # Structured product search first
         raw_products = find_products_in_json(data)
         for node in raw_products:
             title = node.get("title") or node.get("name") or node.get("modelName")
@@ -189,7 +181,7 @@ class YandexMarketParser:
             product_id = node.get("id") or node.get("modelId") or node.get("skuId") or node.get("wareId")
             if not url and product_id:
                 url = f"https://market.yandex.ru/product/{product_id}"
-            price = normalize_price(node.get("price") or node.get("priceValue") or node.get("value"))
+            price = self._extract_price(node)
             if title and url:
                 image = self._image(node)
                 vendor = node.get("vendor") if isinstance(node.get("vendor"), dict) else {}
@@ -201,7 +193,7 @@ class YandexMarketParser:
                     price=price,
                     images=[image] if image else [], mainImage=image or "",
                     url=normalize_url(url, "https://market.yandex.ru/"),
-                    rating=float((node.get("ratings") or {}).get("value") if isinstance(node.get("ratings"), dict) else node.get("rating") or 0),
+                    rating=self._extract_rating(node),
                     reviewsCount=int(node.get("reviewCount") or node.get("opinionsCount") or 0),
                     category=category, region=region,
                     geo=default_geo(region) | {"detectedRegion": region},
@@ -211,14 +203,14 @@ class YandexMarketParser:
                 break
         if out:
             return self._dedupe(out)
-        # Walk all nodes
+        # Walk all dict nodes as fallback
         for node in self._walk(data):
             title = node.get("title") or node.get("name") or node.get("modelName")
             url = node.get("url") or node.get("productUrl") or node.get("navnodeUrl") or node.get("link")
             product_id = node.get("id") or node.get("modelId") or node.get("skuId") or node.get("wareId")
             if not url and product_id:
                 url = f"https://market.yandex.ru/product/{product_id}"
-            price = normalize_price(node.get("price") or node.get("priceValue") or node.get("value"))
+            price = self._extract_price(node)
             if title and url:
                 image = self._image(node)
                 vendor = node.get("vendor") if isinstance(node.get("vendor"), dict) else {}
@@ -230,7 +222,7 @@ class YandexMarketParser:
                     price=price,
                     images=[image] if image else [], mainImage=image or "",
                     url=normalize_url(url, "https://market.yandex.ru/"),
-                    rating=float((node.get("ratings") or {}).get("value") if isinstance(node.get("ratings"), dict) else node.get("rating") or 0),
+                    rating=self._extract_rating(node),
                     reviewsCount=int(node.get("reviewCount") or node.get("opinionsCount") or 0),
                     category=category, region=region,
                     geo=default_geo(region) | {"detectedRegion": region},
@@ -239,6 +231,35 @@ class YandexMarketParser:
             if len(out) >= limit:
                 break
         return self._dedupe(out)
+
+    def _extract_price(self, node: dict) -> float:
+        # Direct keys
+        direct = normalize_price(node.get("price") or node.get("priceValue") or node.get("value"))
+        if direct:
+            return direct
+        # Nested: prices.min.value, price.value, etc.
+        for prices_key in ("prices", "price"):
+            prices = node.get(prices_key)
+            if isinstance(prices, dict):
+                for sub_key in ("min", "current", "value"):
+                    sub = prices.get(sub_key)
+                    if isinstance(sub, dict):
+                        v = normalize_price(sub.get("value") or sub.get("amount"))
+                        if v:
+                            return v
+                    elif sub:
+                        v = normalize_price(sub)
+                        if v:
+                            return v
+        return 0.0
+
+    def _extract_rating(self, node: dict) -> float:
+        ratings = node.get("ratings")
+        if isinstance(ratings, dict):
+            v = ratings.get("value") or ratings.get("overall")
+            if v:
+                return float(v)
+        return float(node.get("rating") or 0)
 
     async def _detail(self, fetcher: Fetcher, url: str, region: str, category: str) -> ProductItem | None:
         if not url:

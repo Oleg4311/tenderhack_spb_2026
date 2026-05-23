@@ -13,10 +13,23 @@ from app.parsers.http_client import Fetcher, browser_headers
 logger = logging.getLogger(__name__)
 
 SITE_POOL = {
-    "tires": ["4tochki.ru", "autoopt.ru", "kolesa.ru", "shinexp.ru"],
+    "tires": ["4tochki.ru", "kolesa.ru", "autoopt.ru", "shinexp.ru"],
     "office": ["foroffice.ru", "oldi.ru", "price.ru", "komus.ru"],
-    "clothes": ["zolla.com", "sportmaster.ru", "kari.com"],
+    "clothes": ["zolla.com", "sportmaster.ru", "kari.com", "sela.ru"],
 }
+
+# Normalize user-supplied category to pool keys
+_CATEGORY_ALIASES: dict[str, str] = {
+    "clothes": "clothes", "clothing": "clothes", "apparel": "clothes", "fashion": "clothes",
+    "одежда": "clothes", "обувь": "clothes", "одежда и обувь": "clothes",
+    "tires": "tires", "tyres": "tires", "шины": "tires", "резина": "tires",
+    "office": "office", "офис": "office", "канцелярия": "office", "офисная техника": "office",
+    "электроника": "office", "electronics": "office",
+}
+
+
+def _resolve_category(category: str) -> str:
+    return _CATEGORY_ALIASES.get((category or "").lower().strip(), "tires")
 
 SEARCH_PATTERNS = [
     "https://{host}/search/?q={q}",
@@ -26,12 +39,35 @@ SEARCH_PATTERNS = [
 ]
 
 ADAPTERS = {
+    # ── Tires ──────────────────────────────────────────────────────────────────
     "4tochki.ru": {
         "search": ["https://4tochki.ru/search/?q={q}", "https://4tochki.ru/catalog/tyres/?q={q}"],
         "allow": ["/catalog/tires/", "/catalog/tyres/", "/products/tyres/", "/tyres/"],
         "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
         "stock_patterns": [r"(?:наличие|остаток|склад)[:\s]+([^.!?]{2,80})"],
     },
+    "kolesa.ru": {
+        "search": [
+            "https://kolesa.ru/tyres/?q={q}",
+            "https://kolesa.ru/tyres/?search={q}",
+        ],
+        "allow": ["/tyres/", "/shiny/", "/product/", "/item/"],
+        "seller": "kolesa.ru",
+    },
+    "autoopt.ru": {
+        "search": ["https://autoopt.ru/search/?q={q}", "https://autoopt.ru/catalog/?text={q}"],
+        "allow": ["/catalog/", "/product/", "/item/"],
+        "seller": "АвтоОпт",
+    },
+    "shinexp.ru": {
+        "search": [
+            "https://shinexp.ru/search/?q={q}",
+            "https://shinexp.ru/catalog/?q={q}",
+        ],
+        "allow": ["/catalog/", "/product/", "/item/"],
+        "seller": "ShineXP",
+    },
+    # ── Office / Electronics ───────────────────────────────────────────────────
     "foroffice.ru": {
         "search": ["https://www.foroffice.ru/search/?q={q}", "https://foroffice.ru/search/?q={q}"],
         "allow": ["/products/", "/catalog/"],
@@ -58,6 +94,16 @@ ADAPTERS = {
         "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
         "seller": "Комус",
     },
+    # ── Clothes / Shoes ────────────────────────────────────────────────────────
+    "zolla.com": {
+        "search": [
+            "https://zolla.com/search/?q={q}",
+            "https://zolla.com/catalog/search/?q={q}",
+        ],
+        "allow": ["/product/"],
+        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
+        "seller": "Zolla",
+    },
     "sportmaster.ru": {
         "preflight": "https://www.sportmaster.ru/",
         "search": [
@@ -68,78 +114,41 @@ ADAPTERS = {
         "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
         "seller": "Спортмастер",
     },
-    "wildberries.ru": {
-        "search": [
-            "https://www.wildberries.ru/catalog/0/search.aspx?search={q}",
-            "https://www.wildberries.ru/catalog/odezda-obuv-aksessuary/search.aspx?search={q}",
-        ],
-        "allow": ["/catalog/"],
-        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
-        "seller": "Wildberries",
-    },
-    "bonprix.ru": {
-        "search": [
-            "https://www.bonprix.ru/search/{q}/",
-            "https://www.bonprix.ru/?s={q}",
-        ],
-        "allow": ["/produkt/", "/catalog/", "/product/"],
-        "seller": "bonprix",
-    },
-    "zolla.com": {
-        "search": [
-            "https://zolla.com/search/?q={q}",
-            "https://zolla.com/catalog/search/?q={q}",
-        ],
-        "allow": ["/product/"],
-        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
-        "seller": "Zolla",
-    },
     "kari.com": {
         "preflight": "https://kari.com/",
         "search": [
             "https://kari.com/catalog/?q={q}",
             "https://kari.com/search/?q={q}",
-            "https://kari.com/catalog/search/?q={q}",
         ],
         "allow": ["/catalog/product/", "/product/", "/catalog/"],
         "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})"],
         "seller": "kari",
     },
-    "autoopt.ru": {
-        "search": ["https://autoopt.ru/search/?q={q}", "https://autoopt.ru/catalog/?text={q}"],
-        "allow": ["/catalog/", "/product/", "/item/"],
-        "seller": "АвтоОпт",
-    },
-    "kolesa.ru": {
+    "sela.ru": {
+        "preflight": "https://sela.ru/",
         "search": [
-            "https://kolesa.ru/tyres/?q={q}",
-            "https://kolesa.ru/tyres/?search={q}",
+            "https://sela.ru/search/?q={q}",
+            "https://sela.ru/catalog/?q={q}",
         ],
-        "allow": ["/tyres/", "/shiny/", "/product/"],
-        "seller": "kolesa.ru",
-    },
-    "shinexp.ru": {
-        "search": [
-            "https://shinexp.ru/search/?q={q}",
-            "https://shinexp.ru/catalog/?q={q}",
-        ],
-        "allow": ["/catalog/", "/product/", "/item/"],
-        "seller": "ShineXP",
+        "allow": ["/product/", "/catalog/"],
+        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})"],
+        "seller": "SELA",
     },
 }
 
 
 # Sites that always block plain HTTP — go straight to Playwright, skip the failed HTTP round-trip.
-BROWSER_FIRST_HOSTS = {"sportmaster.ru", "kari.com", "4tochki.ru"}
+BROWSER_FIRST_HOSTS = {"sportmaster.ru", "kari.com", "4tochki.ru", "sela.ru"}
 
 
 class RunetParser:
     source = "runet"
 
     async def search(self, query: str, region: str = "Москва", limit: int = 10, category: str = "tires") -> SourceResult:
-        hosts = SITE_POOL.get(category, SITE_POOL["tires"])
+        cat_key = _resolve_category(category)
+        hosts = SITE_POOL.get(cat_key, SITE_POOL["tires"])
         per_host = max(1, limit // max(1, len(hosts)) + 1)
-        logger.info("[runet] query=%r category=%s hosts=%s", query, category, hosts)
+        logger.info("[runet] query=%r category=%s cat_key=%s hosts=%s", query, category, cat_key, hosts)
         async with Fetcher() as fetcher:
             tasks = [
                 asyncio.wait_for(

@@ -5,7 +5,7 @@ from typing import Any
 from app.parsers.common import SOURCE_KEYS, SourceResult, calculate_completeness, calculate_relevance, relevance_breakdown
 from app.parsers.ozon import OzonParser
 from app.parsers.query_normalizer import expand_query, normalize_query
-from app.parsers.runet import RunetParser
+from app.parsers.runet import RunetParser, _resolve_category
 from app.parsers.wildberries import WildberriesParser
 from app.parsers.yandex_market import YandexMarketParser
 
@@ -26,7 +26,7 @@ async def _run_source(source: str, query: str, expanded: list[str], category: st
     started = time.perf_counter()
     try:
         parser = PARSERS[source]()
-        result = await asyncio.wait_for(parser.search(query, region=region, limit=limit, category=category), timeout=40)
+        result = await asyncio.wait_for(parser.search(query, region=region, limit=limit, category=category), timeout=45)
         if result.status == "empty" and source != "runet":
             for variant in expanded[1:3]:
                 result = await asyncio.wait_for(parser.search(variant, region=region, limit=limit, category=category), timeout=25)
@@ -42,8 +42,8 @@ async def _run_source(source: str, query: str, expanded: list[str], category: st
         }
         return result
     except asyncio.TimeoutError:
-        HEALTH[source] = {"source": source, "status": "error", "lastError": "source timeout > 40s", "lastLatencyMs": int((time.perf_counter() - started) * 1000), "lastItemsCount": 0}
-        return SourceResult(source, "error", errorReason="source timeout > 40s")
+        HEALTH[source] = {"source": source, "status": "error", "lastError": "source timeout > 45s", "lastLatencyMs": int((time.perf_counter() - started) * 1000), "lastItemsCount": 0}
+        return SourceResult(source, "error", errorReason="source timeout > 45s")
     except Exception as exc:
         HEALTH[source] = {"source": source, "status": "error", "lastError": str(exc), "lastLatencyMs": int((time.perf_counter() - started) * 1000), "lastItemsCount": 0}
         return SourceResult(source, "error", errorReason=str(exc))
@@ -69,6 +69,7 @@ def _postprocess(result: SourceResult, normalized: str, limit: int) -> SourceRes
 
 
 async def search_products(query: str, category: str, region: str, limit: int = 10) -> dict[str, Any]:
+    category = _resolve_category(category)
     normalized = normalize_query(query, category)
     expanded = expand_query(normalized, category)
     limit = max(1, min(int(limit or 10), 30))
@@ -77,7 +78,7 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
         source: asyncio.create_task(_run_source(source, normalized, expanded, category, region, limit))
         for source in SOURCE_KEYS
     }
-    done, pending = await asyncio.wait(tasks.values(), timeout=50)
+    done, pending = await asyncio.wait(tasks.values(), timeout=55)
     for task in pending:
         task.cancel()
     if pending:

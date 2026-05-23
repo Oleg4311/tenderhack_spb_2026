@@ -28,10 +28,17 @@ SYNONYMS = {
 def normalize_query(query: str, category: str = "") -> str:
     text = (query or "").lower().strip()
     has_cyrillic = any("а" <= c <= "я" or c == "ё" for c in text)
-    if not has_cyrillic and re.fullmatch(r"[a-z0-9/\- .]+", text) and any(c in text for c in "qwertyuiopasdfghjklzxcvbnm"):
-        laid = text.translate(RU_LAYOUT)
-        if any("а" <= c <= "я" for c in laid):
-            text = laid
+    # Apply keyboard layout conversion only when text has NO English vowels (a/e/o/u).
+    # Genuine English product names (laptop, phone, samsung) have vowels;
+    # Russian-typed-with-English-layout produces consonant-heavy strings (htpbyf, ibys).
+    # Note: 'i' is excluded from the vowel check because Russian й/ш/и keys map to i in English layout.
+    if not has_cyrillic and re.fullmatch(r"[a-z0-9/\- .]+", text):
+        pure_letters = re.sub(r"[^a-z]", "", text)
+        english_vowels = sum(1 for c in pure_letters if c in "aeou")
+        if english_vowels == 0 and pure_letters:
+            laid = text.translate(RU_LAYOUT)
+            if any("а" <= c <= "я" for c in laid):
+                text = laid
     text = re.sub(r"[^\wа-яё/.\- ]+", " ", text, flags=re.I)
     text = re.sub(r"\s+", " ", text).strip()
     for bad, good in TYPO_FIXES.items():

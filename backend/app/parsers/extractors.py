@@ -95,18 +95,64 @@ def extract_next_data(html: str) -> Any:
     return _loads(match.group(1)) if match else None
 
 
+def _extract_js_object(text: str, start: int) -> str | None:
+    """Extract a complete JS object/array starting at `start` via brace counting.
+
+    Handles nested objects, quoted strings, and escape sequences correctly.
+    Replaces broken `{.*?}` regex which stops at the first closing brace.
+    """
+    depth = 0
+    in_str = False
+    esc = False
+    qc = ""
+    for i in range(start, min(start + 2_000_000, len(text))):
+        c = text[i]
+        if esc:
+            esc = False
+            continue
+        if c == "\\" and in_str:
+            esc = True
+            continue
+        if in_str:
+            if c == qc:
+                in_str = False
+            continue
+        if c in ('"', "'", "`"):
+            in_str = True
+            qc = c
+            continue
+        if c in ("{", "["):
+            depth += 1
+        elif c in ("}", "]"):
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def extract_initial_state(html: str) -> list[Any]:
     out = []
+    # Patterns that precede a JS object literal (window.X = {...})
     patterns = [
-        r"window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*;",
-        r"window\.__PRELOADED_STATE__\s*=\s*(\{.*?\})\s*;",
-        r"window\.__NUXT__\s*=\s*(\{.*?\})\s*;",
+        r"window\.__INITIAL_STATE__\s*=\s*",
+        r"window\.__PRELOADED_STATE__\s*=\s*",
+        r"window\.__NUXT__\s*=\s*",
+        r"window\.__data\s*=\s*",          # Yandex Market
+        r"window\.bunker\s*=\s*",           # Yandex Market bunker
+        r"window\.__SEARCH_DATA__\s*=\s*",
     ]
     for pattern in patterns:
-        for match in re.finditer(pattern, html or "", re.S):
-            data = _loads(match.group(1))
-            if data is not None:
-                out.append(data)
+        for m in re.finditer(pattern, html or ""):
+            pos = m.end()
+            while pos < len(html) and html[pos] in " \t\n\r":
+                pos += 1
+            if pos >= len(html) or html[pos] not in "{[":
+                continue
+            extracted = _extract_js_object(html, pos)
+            if extracted:
+                data = _loads(extracted)
+                if data is not None:
+                    out.append(data)
     return out
 
 
@@ -135,10 +181,10 @@ def extract_embedded_json(html: str) -> list[Any]:
     return out
 
 
-_PRODUCT_NAME_KEYS = {"name", "title", "goodsName", "productName", "displayName"}
-_PRODUCT_PRICE_KEYS = {"price", "salePrice", "finalPrice", "priceU", "currentPrice", "cardPrice", "priceValue"}
-_PRODUCT_ID_KEYS = {"id", "sku", "nmId", "productId", "skuId", "wareId", "articleId"}
-_PRODUCT_URL_KEYS = {"url", "link", "productUrl", "href", "detailUrl"}
+_PRODUCT_NAME_KEYS = {"name", "title", "goodsName", "productName", "displayName", "modelName", "offerName", "itemName"}
+_PRODUCT_PRICE_KEYS = {"price", "salePrice", "finalPrice", "priceU", "currentPrice", "cardPrice", "priceValue", "sellPrice", "basePrice", "minPrice", "salePriceU"}
+_PRODUCT_ID_KEYS = {"id", "sku", "nmId", "productId", "skuId", "wareId", "articleId", "modelId", "offerId"}
+_PRODUCT_URL_KEYS = {"url", "link", "productUrl", "href", "detailUrl", "absoluteUrl", "canonicalUrl"}
 
 
 def looks_like_product(obj: dict) -> bool:
@@ -150,7 +196,7 @@ def looks_like_product(obj: dict) -> bool:
     return has_name and (has_price or has_id or has_url)
 
 
-def find_products_in_json(data: Any, _depth: int = 0, _max: int = 14) -> list[dict]:
+def find_products_in_json(data: Any, _depth: int = 0, _max: int = 20) -> list[dict]:
     if _depth > _max:
         return []
     results: list[dict] = []
@@ -163,6 +209,11 @@ def find_products_in_json(data: Any, _depth: int = 0, _max: int = 14) -> list[di
     elif isinstance(data, list):
         for item in data[:500]:
             results.extend(find_products_in_json(item, _depth + 1, _max))
+    elif isinstance(data, str) and 10 < len(data) < 600_000 and data.lstrip()[:1] in "{[":
+        # Handles Ozon widgetStates (each value is stringified JSON), YM embedded state, etc.
+        parsed = _loads(data)
+        if parsed is not None:
+            results.extend(find_products_in_json(parsed, _depth + 1, _max))
     return results
 
 

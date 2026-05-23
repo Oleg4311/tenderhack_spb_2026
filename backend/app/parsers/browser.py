@@ -371,12 +371,8 @@ async def fetch_rendered_html(
             if warmup_url and ctx_key not in _context_warmed:
                 _context_warmed.add(ctx_key)
                 try:
-                    await page.goto(warmup_url, wait_until="commit", timeout=7_000)
-                    await page.wait_for_timeout(random.randint(800, 1500))
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=3_000)
-                    except Exception:
-                        pass
+                    await page.goto(warmup_url, wait_until="commit", timeout=3_000)
+                    await page.wait_for_timeout(random.randint(300, 600))
                 except Exception:
                     pass
 
