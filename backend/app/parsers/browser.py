@@ -223,6 +223,11 @@ class BrowserResult:
     product_payloads: list[dict | list] = field(default_factory=list)
     status: str = "empty"
     errorReason: str = ""
+    # counters for logging
+    xhr_payloads: int = 0
+    xhr_product_payloads: int = 0
+    page_loaded: bool = False
+    status_code: int = 0
 
 
 async def get_browser():
@@ -236,8 +241,10 @@ async def get_browser():
             raise RuntimeError("Playwright is not installed in this runtime image") from exc
         _playwright = await async_playwright().start()
         _chromium_path = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH") or None
+        _headless_env = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower()
+        _headless = _headless_env not in ("0", "false", "no")
         _browser = await _playwright.chromium.launch(
-            headless="new",  # режим "new" хуже детектируется чем headless=True
+            headless=_headless,
             executable_path=_chromium_path,
             args=[
                 "--no-sandbox",
@@ -267,23 +274,33 @@ async def get_browser():
 
 def _browser_proxy() -> dict | None:
     proxy = proxy_manager.get()
-    return {"server": proxy} if proxy else None
+    if not proxy:
+        return None
+    parsed = urlparse(proxy)
+    result: dict = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
+    if parsed.username:
+        result["username"] = parsed.username
+    if parsed.password:
+        result["password"] = parsed.password
+    return result
 
 
-async def _get_context(domain: str):
+async def _get_context(domain: str, use_proxy: bool = True):
     """Get or create a persistent BrowserContext for domain.
 
     Cookies and localStorage survive across calls, so the site sees a returning
     user instead of a new bot fingerprint on every request.
     """
-    if domain not in _context_locks:
-        _context_locks[domain] = asyncio.Lock()
-    async with _context_locks[domain]:
+    # Key includes proxy mode so direct and proxy contexts are separate
+    ctx_key = f"{domain}:{'proxy' if use_proxy else 'direct'}"
+    if ctx_key not in _context_locks:
+        _context_locks[ctx_key] = asyncio.Lock()
+    async with _context_locks[ctx_key]:
         browser = await get_browser()
         # Reuse existing context if the browser hasn't restarted
-        if domain in _contexts and _context_browsers.get(domain) is browser:
-            return _contexts[domain]
-        proxy = _browser_proxy()
+        if ctx_key in _contexts and _context_browsers.get(ctx_key) is browser:
+            return _contexts[ctx_key]
+        proxy = _browser_proxy() if use_proxy else None
         ua = random.choice(USER_AGENTS)
         context_kwargs: dict = {
             "user_agent": ua,
@@ -313,8 +330,8 @@ async def _get_context(domain: str):
         context.set_default_timeout(10_000)
         context.set_default_navigation_timeout(20_000)
         await context.add_init_script(_STEALTH_JS)
-        _contexts[domain] = context
-        _context_browsers[domain] = browser
+        _contexts[ctx_key] = context
+        _context_browsers[ctx_key] = browser
         return context
 
 
@@ -332,25 +349,27 @@ async def fetch_rendered_html(
     region: str = "",
     wait_selectors: list[str] | None = None,
     scroll_steps: int = 3,
+    use_proxy: bool = True,
 ) -> BrowserResult:
     async with _browser_semaphore:
         domain = urlparse(url).netloc
+        ctx_key = f"{domain}:{'proxy' if use_proxy else 'direct'}"
         page = None
         on_response = None
         payloads: list[dict | list] = []
         product_payloads: list[dict | list] = []
         try:
-            context = await _get_context(domain)
+            context = await _get_context(domain, use_proxy=use_proxy)
             page = await context.new_page()
 
             # Referer changes per-call so set it at page level (overrides context header)
             if referer:
                 await page.set_extra_http_headers({"Referer": referer})
 
-            # Warmup: visit homepage once per domain lifetime so cookies/session are established.
+            # Warmup: visit homepage once per domain+proxy_mode lifetime so cookies/session are established.
             # With persistent context this only runs on the very first request to each domain.
-            if warmup_url and domain not in _context_warmed:
-                _context_warmed.add(domain)
+            if warmup_url and ctx_key not in _context_warmed:
+                _context_warmed.add(ctx_key)
                 try:
                     await page.goto(warmup_url, wait_until="commit", timeout=7_000)
                     await page.wait_for_timeout(random.randint(800, 1500))
@@ -447,14 +466,19 @@ async def fetch_rendered_html(
                 html = ""
             status_code = response.status if response else 0
 
+            _counters = dict(
+                xhr_payloads=len(payloads),
+                xhr_product_payloads=len(product_payloads),
+                page_loaded=bool(html),
+                status_code=status_code,
+            )
+
             if detect_blocked_page(html, status_code):
                 if product_payloads:
                     return BrowserResult(
-                        html=html,
-                        json_payloads=payloads,
-                        product_payloads=product_payloads,
-                        status="ok",
-                        errorReason="challenge page but XHR product payloads captured",
+                        html=html, json_payloads=payloads, product_payloads=product_payloads,
+                        status="ok", errorReason="challenge page but XHR product payloads captured",
+                        **_counters,
                     )
                 try:
                     await page.wait_for_timeout(3_000)
@@ -462,35 +486,30 @@ async def fetch_rendered_html(
                 except Exception:
                     pass
                 html2 = await page.content()
+                _counters["page_loaded"] = bool(html2)
                 if not detect_blocked_page(html2, status_code):
-                    return BrowserResult(html=html2, json_payloads=payloads, product_payloads=product_payloads, status="ok")
+                    return BrowserResult(html=html2, json_payloads=payloads, product_payloads=product_payloads, status="ok", **_counters)
                 if product_payloads:
                     return BrowserResult(
-                        html=html2,
-                        json_payloads=payloads,
-                        product_payloads=product_payloads,
-                        status="ok",
-                        errorReason="challenge page but XHR product payloads captured",
+                        html=html2, json_payloads=payloads, product_payloads=product_payloads,
+                        status="ok", errorReason="challenge page but XHR product payloads captured",
+                        **_counters,
                     )
                 return BrowserResult(
-                    html=html2,
-                    json_payloads=payloads,
-                    product_payloads=product_payloads,
-                    status="blocked",
-                    errorReason="CAPTCHA or access restriction after JS challenge wait",
+                    html=html2, json_payloads=payloads, product_payloads=product_payloads,
+                    status="blocked", errorReason="CAPTCHA or access restriction after JS challenge wait",
+                    **_counters,
                 )
 
             return BrowserResult(
-                html=html,
-                json_payloads=payloads,
-                product_payloads=product_payloads,
-                status="ok" if html else "empty",
+                html=html, json_payloads=payloads, product_payloads=product_payloads,
+                status="ok" if html else "empty", **_counters,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.info("[Browser] fallback failed for %s: %s", url, exc)
-            return BrowserResult(status="error", errorReason=str(exc))
+            return BrowserResult(status="error", errorReason=str(exc), page_loaded=False)
         finally:
             if page:
                 if on_response:
@@ -520,6 +539,7 @@ async def close_browser() -> None:
             pass
     _contexts.clear()
     _context_browsers.clear()
+    _context_locks.clear()
     _context_warmed.clear()
     if _browser:
         await _browser.close()

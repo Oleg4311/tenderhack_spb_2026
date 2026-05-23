@@ -38,9 +38,10 @@ REFERERS = {
 
 # Набор TLS-профилей: разные браузеры, разные версии — снижаем вероятность блокировки по JA3/JA4
 _IMPERSONATE_PROFILES = [
-    "chrome124", "chrome120", "chrome110", "chrome101",
-    "firefox117",
-    "safari15_5",
+    "chrome124", "chrome123", "chrome120", "chrome119",
+    "chrome116", "chrome110", "chrome107",
+    "safari17_0", "safari15_5",
+    "edge101",
 ]
 
 # Коды ответов, при которых прокси уходит в cooldown
@@ -58,13 +59,24 @@ class ProxyManager:
 
     def _load_proxies(self) -> list[str]:
         result: list[str] = []
+        username = os.getenv("PROXY_USERNAME", "").strip()
+        password = os.getenv("PROXY_PASSWORD", "").strip()
         url = os.getenv("PROXY_URL", "").strip()
         if url:
+            if username and password and "@" not in url:
+                from urllib.parse import urlparse as _up
+                _p = _up(url)
+                url = f"{_p.scheme}://{username}:{password}@{_p.netloc}{_p.path}"
             result.append(url)
         for p in os.getenv("PROXY_LIST", "").split(","):
             p = p.strip()
-            if p and p not in result:
-                result.append(p)
+            if p:
+                if username and password and "@" not in p:
+                    from urllib.parse import urlparse as _up
+                    _p = _up(p)
+                    p = f"{_p.scheme}://{username}:{password}@{_p.netloc}{_p.path}"
+                if p not in result:
+                    result.append(p)
         return result
 
     def get(self) -> str | None:
@@ -168,8 +180,8 @@ def _decode_text(content: bytes, declared_text: str) -> str:
 class Fetcher:
     """HTTP-клиент с curl_cffi (TLS-имперсонация Chrome/Firefox/Safari) + ротацией прокси."""
 
-    def __init__(self):
-        self._proxy = proxy_manager.get()
+    def __init__(self, use_proxy: bool = True):
+        self._proxy = proxy_manager.get() if use_proxy else None
         # Каждый экземпляр получает случайный TLS-профиль — разные профили = разные JA3/JA4
         self._profile = random.choice(_IMPERSONATE_PROFILES)
 

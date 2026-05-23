@@ -166,6 +166,136 @@ def find_products_in_json(data: Any, _depth: int = 0, _max: int = 14) -> list[di
     return results
 
 
+def _card_to_dict(card, base_url: str = "") -> dict:
+    """Extract product data from one DOM card element by semantic patterns."""
+    # Title: first meaningful heading or labeled text node
+    title = ""
+    for sel in ["h3", "h2", "h1", "[class*='name' i]", "[class*='title' i]", "[class*='label' i]", "strong", "a[href]"]:
+        try:
+            el = card.select_one(sel)
+        except Exception:
+            continue
+        if el:
+            text = el.get_text(" ", strip=True)
+            if 5 < len(text) < 300:
+                title = text
+                break
+    if not title:
+        title = card.get("data-name") or card.get("title") or card.get("aria-label") or ""
+
+    # Price: prefer data-attributes, then itemprop, then class-based
+    price = 0.0
+    for sel in ['[itemprop="price"]', "[data-price]", "[class*='price' i]", "[data-auto*='price' i]", "[class*='cost' i]"]:
+        try:
+            els = card.select(sel)
+        except Exception:
+            continue
+        for el in els:
+            raw = el.get("content") or el.get("data-price") or el.get_text(" ", strip=True)
+            p = normalize_price(raw)
+            if 10 < p < 50_000_000:
+                price = p
+                break
+        if price:
+            break
+    if not price:
+        price = normalize_price(card.get_text(" ", strip=True))
+
+    # URL: first meaningful link
+    url = ""
+    for a in card.select("a[href]"):
+        href = str(a.get("href", ""))
+        if href and href != "#" and not href.startswith("javascript") and len(href) > 3:
+            url = normalize_url(href, base_url)
+            break
+
+    # Image: prefer data-src (lazy) over src
+    image = ""
+    for el in card.select("img"):
+        src = el.get("data-src") or el.get("data-original") or el.get("src") or ""
+        if src and not src.startswith("data:") and len(src) > 10:
+            image = normalize_url(src, base_url)
+            break
+
+    # Rating
+    rating = 0.0
+    for sel in ["[class*='rating' i]", "[class*='stars' i]", "[data-auto*='rating' i]", "[class*='review' i]"]:
+        try:
+            el = card.select_one(sel)
+        except Exception:
+            continue
+        if el:
+            m = re.search(r"([1-5][.,]\d)", el.get_text(" ", strip=True))
+            if m:
+                rating = float(m.group(1).replace(",", "."))
+                break
+
+    product_id = (
+        card.get("data-nm-id") or card.get("data-id") or
+        card.get("data-product-id") or card.get("data-sku") or ""
+    )
+    brand = card.get("data-brand") or ""
+
+    return {
+        "title": clean_text(title),
+        "price": price,
+        "url": url,
+        "image": image,
+        "rating": rating,
+        "brand": clean_text(brand),
+        "product_id": str(product_id),
+    }
+
+
+def extract_dom_cards(html: str, base_url: str = "") -> list[dict]:
+    """Extract product cards using multiple selector patterns (not a single CSS class).
+
+    Tries selectors from most specific to most generic. Stops at the first one
+    that produces at least 2 cards with a title + (price or url).
+    """
+    if BeautifulSoup is None:
+        return []
+    soup = _soup(html)
+    # Ordered by specificity: WB → YM → Ozon → generic article → class patterns
+    CARD_SELECTORS = [
+        'article[data-nm-id]',           # WB product card
+        '[data-zone-name="snippet"]',     # YM snippet
+        '[data-auto="snippet"]',
+        '[data-testid*="product"]',
+        '[data-auto*="product"]',
+        'article[class*="tile"]',
+        'article[class*="product"]',
+        'article[class*="card"]',
+        'article',
+        '[class*="product-card"]',
+        '[class*="ProductCard"]',
+        '[class*="product_card"]',
+        '[class*="goods-tile"]',
+        '[class*="tile-root"]',
+        '[class*="tileContent"]',
+        '[class*="search-snippet"]',
+        '[class*="searchSnippet"]',
+        'li[class*="product"]',
+        'div[class*="product"][data-id]',
+        'div[class*="item"][data-id]',
+    ]
+    for selector in CARD_SELECTORS:
+        try:
+            found = soup.select(selector)
+        except Exception:
+            continue
+        if len(found) < 2:
+            continue
+        cards = []
+        for el in found[:150]:
+            d = _card_to_dict(el, base_url)
+            if d["title"] and (d["price"] or d["url"]):
+                cards.append(d)
+        if len(cards) >= 2:
+            return cards
+    return []
+
+
 def _add_char(chars: dict[str, Any], key: Any, value: Any) -> None:
     key_text = clean_text(key)
     if not key_text or len(key_text) > 80:

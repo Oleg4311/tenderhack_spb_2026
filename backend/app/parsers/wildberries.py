@@ -3,17 +3,23 @@ import logging
 from urllib.parse import quote_plus
 
 from app.parsers.browser import fetch_rendered_html
+from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price
+from app.parsers.extractors import (
+    extract_characteristics_from_json,
+    extract_dom_cards,
+    extract_embedded_json,
+    extract_product_from_html,
+    extract_product_links,
+    find_products_in_json,
+)
+from app.parsers.http_client import Fetcher, json_headers
 
 logger = logging.getLogger(__name__)
-from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price
-from app.parsers.extractors import extract_characteristics_from_json, extract_embedded_json, extract_product_from_html, extract_product_links
-from app.parsers.http_client import Fetcher, json_headers
 
 REGION_DEST = {"москва": "-1257786", "санкт-петербург": "-1275499", "спб": "-1275499"}
 SEARCH_ENDPOINTS = [
     "https://search.wb.ru/exactmatch/ru/common/v7/search",
     "https://search.wb.ru/exactmatch/ru/common/v5/search",
-    "https://search.wb.ru/exactmatch/ru/common/v4/search",
 ]
 
 
@@ -54,147 +60,197 @@ class WildberriesParser:
     source = "wildberries"
 
     async def search(self, query: str, region: str = "Москва", limit: int = 10, category: str = "") -> SourceResult:
+        search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={quote_plus(query)}"
+        logger.info("[source=wb] query=%r region=%s limit=%d", query, region, limit)
+
         items: list[ProductItem] = []
-        params = {
-            "ab_testing": "false", "appType": "1", "curr": "rub", "dest": _dest(region),
-            "query": query, "resultset": "catalog", "sort": "popular", "spp": "30", "page": "1", "lang": "ru",
-        }
-        async with Fetcher() as fetcher:
-            blocked_reason = ""
-            _conn_errors = 0
-            for endpoint in SEARCH_ENDPOINTS[:2]:
-                try:
-                    resp = await asyncio.wait_for(
-                        fetcher.get_json(endpoint, source=self.source, headers=json_headers(source=self.source), params=params, retries=0),
-                        timeout=12,
-                    )
-                except asyncio.TimeoutError:
-                    _conn_errors += 1
-                    blocked_reason = blocked_reason or "connection timeout on WB search API (search.wb.ru unreachable)"
-                    continue
-                except Exception as exc:
-                    _conn_errors += 1
-                    blocked_reason = blocked_reason or f"connection error: {type(exc).__name__} — WB unreachable from current IP"
-                    continue
-                if resp.blocked:
-                    blocked_reason = f"HTTP {resp.status_code}: blocked by Wildberries"
-                    continue
-                products = ((resp.json_data or {}).get("data") or {}).get("products") or []
-                logger.info("[wb] endpoint=%s status=%d products=%d", endpoint, resp.status_code, len(products))
-                for raw in products[:limit]:
-                    item = self._from_search_product(raw, region, category)
-                    if item:
-                        items.append(item)
-                if items:
-                    break
+        blocked_reason = ""
 
-            for idx, item in enumerate(items[: min(limit, 3)]):
-                try:
-                    detail = await asyncio.wait_for(self._detail(fetcher, item.productId, item.url, region, category), timeout=8)
-                except Exception:
-                    detail = None
-                items[idx] = merge_product_data(item, detail)
+        # ── 1. Browser-first: open search page via Playwright ─────────────────
+        try:
+            rendered = await asyncio.wait_for(
+                fetch_rendered_html(
+                    search_url,
+                    referer="https://www.wildberries.ru/",
+                    warmup_url="https://www.wildberries.ru/",
+                    wait_selectors=['[data-nm-id]', 'article', '.product-card', 'a[href*="/catalog/"]'],
+                    scroll_steps=3,
+                    use_proxy=True,
+                ),
+                timeout=35,
+            )
+        except asyncio.TimeoutError:
+            rendered = None
+            blocked_reason = "browser timeout"
+        except Exception as exc:
+            rendered = None
+            blocked_reason = f"browser error: {type(exc).__name__}"
 
-        if not items:
-            search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={quote_plus(query)}"
-            try:
-                rendered = await asyncio.wait_for(
-                    fetch_rendered_html(
-                        search_url,
-                        referer="https://www.wildberries.ru/",
-                        warmup_url="https://www.wildberries.ru/",
-                        wait_selectors=['a[href*="/catalog/"]', '[data-nm-id]', '.product-card', 'article'],
-                        scroll_steps=2,
-                    ),
-                    timeout=25,
-                )
-            except asyncio.TimeoutError:
-                rendered = None
-                blocked_reason = blocked_reason or "browser fallback timeout — WB unreachable"
-            except Exception as exc:
-                rendered = None
-                blocked_reason = blocked_reason or f"browser fallback error: {type(exc).__name__}"
-            if not rendered:
-                status = "blocked" if blocked_reason else "empty"
-                return SourceResult(
-                    self.source,
-                    status,
-                    errorReason=blocked_reason,
-                    diagnostics={
-                        "operatorAction": "configure PROXY_URL env variable to access Wildberries",
-                        "triedEndpoints": SEARCH_ENDPOINTS[:2],
-                    } if blocked_reason else {},
-                )
-            logger.info("[wb] browser_status=%s xhr_payloads=%d", rendered.status if rendered else "none", len(rendered.product_payloads) if rendered else 0)
-            # Extract from XHR-captured WB API payloads (most reliable path)
-            for payload in rendered.product_payloads or []:
-                wb_products = ((payload or {}).get("data") or {}).get("products") or []
-                if not wb_products and isinstance(payload, list):
+        logger.info(
+            "[source=wb] page_loaded=%s xhr_payloads=%d xhr_product_payloads=%d status=%s",
+            rendered.page_loaded if rendered else False,
+            rendered.xhr_payloads if rendered else 0,
+            rendered.xhr_product_payloads if rendered else 0,
+            rendered.status if rendered else "none",
+        )
+
+        # ── 2. Extract from XHR product payloads (WB API responses) ───────────
+        if rendered and rendered.product_payloads:
+            seen_ids: set[str] = set()
+            for payload in rendered.product_payloads:
+                if isinstance(payload, list):
                     wb_products = payload
-                for raw in wb_products[:limit]:
+                elif isinstance(payload, dict):
+                    data_node = payload.get("data")
+                    wb_products = (data_node.get("products") or []) if isinstance(data_node, dict) else []
+                    if not wb_products:
+                        wb_products = find_products_in_json(payload)
+                else:
+                    continue
+                for raw in wb_products:
+                    if not isinstance(raw, dict):
+                        continue
+                    pid = str(raw.get("id") or "")
+                    if pid and pid in seen_ids:
+                        continue
                     item = self._from_search_product(raw, region, category)
                     if item:
+                        if pid:
+                            seen_ids.add(pid)
                         items.append(item)
-                if items:
+                        if len(items) >= limit:
+                            break
+                if len(items) >= limit:
                     break
+            logger.info("[source=wb] json_products=%d (from XHR)", len(items))
 
-            if not items and rendered.status == "blocked" and not rendered.product_payloads:
-                return SourceResult(
-                    self.source,
-                    "blocked",
-                    errorReason=rendered.errorReason or blocked_reason,
-                    diagnostics={"operatorAction": "configure PROXY_URL env variable"},
-                )
-
-            # Also try extracting from embedded JS data (__NUXT__, __INITIAL_STATE__, etc.)
-            if not items and rendered.html:
-                for data in extract_embedded_json(rendered.html):
-                    wb_products = ((data or {}).get("data") or {}).get("products") or []
+        # ── 3. Embedded JSON fallback (__NEXT_DATA__ etc.) ─────────────────────
+        embedded_products = 0
+        if not items and rendered and rendered.html:
+            for data in extract_embedded_json(rendered.html):
+                if isinstance(data, dict):
+                    wb_products = (data.get("data") or {}).get("products") or []
                     if not wb_products:
-                        # Try walking nested structure
-                        def _find_products(node, depth=0):
-                            if depth > 6:
-                                return []
-                            if isinstance(node, dict):
-                                prods = node.get("products") or node.get("catalog") or []
-                                if isinstance(prods, list) and prods and isinstance(prods[0], dict) and prods[0].get("id"):
-                                    return prods
-                                for v in node.values():
-                                    result = _find_products(v, depth + 1)
-                                    if result:
-                                        return result
-                            elif isinstance(node, list):
-                                for item in node[:5]:
-                                    result = _find_products(item, depth + 1)
-                                    if result:
-                                        return result
-                            return []
-                        wb_products = _find_products(data)
-                    for raw in wb_products[:limit]:
+                        wb_products = find_products_in_json(data)
+                elif isinstance(data, list):
+                    wb_products = find_products_in_json(data)
+                else:
+                    continue
+                for raw in wb_products[:limit]:
+                    if isinstance(raw, dict):
+                        item = self._from_search_product(raw, region, category)
+                        if item:
+                            items.append(item)
+                if items:
+                    embedded_products = len(items)
+                    break
+            logger.info("[source=wb] embedded_products=%d", embedded_products)
+
+        # ── 4. DOM card fallback ───────────────────────────────────────────────
+        dom_cards = 0
+        if not items and rendered and rendered.html:
+            cards = extract_dom_cards(rendered.html, "https://www.wildberries.ru/")
+            dom_cards = len(cards)
+            for card in cards[:limit]:
+                if card.get("title") and (card.get("price") or card.get("url")):
+                    item = ProductItem(
+                        source=self.source, sourceType="marketplace", realSourceHost="wildberries.ru",
+                        title=card["title"], price=card["price"],
+                        url=card["url"] or search_url,
+                        mainImage=card["image"], images=[card["image"]] if card["image"] else [],
+                        rating=card["rating"], brand=card["brand"],
+                        productId=card["product_id"],
+                        category=category, region=region, geo=default_geo(region),
+                    )
+                    items.append(item)
+            logger.info("[source=wb] dom_cards=%d", dom_cards)
+
+        # ── 5. HTTP fallback via WB search API ────────────────────────────────
+        if not items:
+            logger.info("[source=wb] trying HTTP fallback to search.wb.ru API")
+            params = {
+                "ab_testing": "false", "appType": "1", "curr": "rub",
+                "dest": _dest(region), "query": query,
+                "resultset": "catalog", "sort": "popular", "spp": "30", "page": "1", "lang": "ru",
+            }
+            async with Fetcher() as fetcher:
+                for endpoint in SEARCH_ENDPOINTS:
+                    try:
+                        resp = await asyncio.wait_for(
+                            fetcher.get_json(endpoint, source=self.source, headers=json_headers(source=self.source), params=params, retries=0),
+                            timeout=12,
+                        )
+                    except Exception:
+                        continue
+                    if resp.blocked:
+                        blocked_reason = blocked_reason or f"HTTP {resp.status_code}: WB API blocked"
+                        continue
+                    data = resp.json_data if isinstance(resp.json_data, dict) else {}
+                    products = (data.get("data") or {}).get("products") or []
+                    logger.info("[source=wb] http_api endpoint=%s products=%d", endpoint, len(products))
+                    for raw in products[:limit]:
                         item = self._from_search_product(raw, region, category)
                         if item:
                             items.append(item)
                     if items:
                         break
 
-            if not items:
-                links = extract_product_links(rendered.html or "", "https://www.wildberries.ru/")
-                async with Fetcher() as fetcher:
-                    for link in links[:limit]:
-                        resp = await fetcher.get_text(link, source=self.source, referer="https://www.wildberries.ru/", retries=0)
-                        if resp.text:
-                            product = extract_product_from_html(resp.text, link, self.source)
-                            product.region = region
-                            product.geo = default_geo(region)
-                            product.category = category
-                            items.append(product)
-        status = "ok" if items else ("blocked" if blocked_reason else "empty")
-        return SourceResult(self.source, status, len(items), blocked_reason if not items else "", items[:limit])
+        # ── 6. HTML product links fallback ────────────────────────────────────
+        if not items and rendered and rendered.html:
+            links = extract_product_links(rendered.html, "https://www.wildberries.ru/")
+            async with Fetcher() as fetcher:
+                for link in links[:limit]:
+                    try:
+                        resp = await asyncio.wait_for(
+                            fetcher.get_text(link, source=self.source, referer="https://www.wildberries.ru/", retries=0),
+                            timeout=8,
+                        )
+                    except Exception:
+                        continue
+                    if resp.text and not resp.blocked:
+                        product = extract_product_from_html(resp.text, link, self.source)
+                        product.region = region
+                        product.geo = default_geo(region)
+                        product.category = category
+                        items.append(product)
+
+        normalized_products = len(items)
+        logger.info("[source=wb] normalized_products=%d", normalized_products)
+
+        # ── 7. Detail enrichment for top items ────────────────────────────────
+        async with Fetcher() as fetcher:
+            for idx, item in enumerate(items[: min(limit, 3)]):
+                if not item.productId:
+                    continue
+                try:
+                    detail = await asyncio.wait_for(self._detail(fetcher, item.productId, item.url, region, category), timeout=8)
+                except Exception:
+                    detail = None
+                items[idx] = merge_product_data(item, detail)
+
+        items = items[:limit]
+        relevant = len([i for i in items if i.title and i.price])
+        logger.info("[source=wb] relevant_products=%d", relevant)
+
+        if not items:
+            reason = blocked_reason or (rendered.errorReason if rendered else "browser unavailable")
+            return SourceResult(
+                self.source, "blocked" if blocked_reason else "empty",
+                errorReason=reason,
+                diagnostics={
+                    "operatorAction": "configure PROXY_URL / use residential proxy for Wildberries",
+                    "triedEndpoints": SEARCH_ENDPOINTS,
+                } if blocked_reason else {},
+            )
+        return SourceResult(self.source, "ok", len(items), "", items)
 
     def _from_search_product(self, p: dict, region: str, category: str) -> ProductItem | None:
         nm_id = p.get("id")
         name = p.get("name")
         if not nm_id or not name:
+            return None
+        # Real WB products have price/size data — skip navigation/filter items
+        if not (p.get("sizes") or p.get("salePriceU") or p.get("priceU") or p.get("feedbacks") is not None):
             return None
         brand = p.get("brand") or ""
         price, old = _price_from_product(p)
@@ -207,25 +263,18 @@ class WildberriesParser:
         chars.update(extract_characteristics_from_json(p, limit=80))
         chars = {k: v for k, v in chars.items() if v}
         return ProductItem(
-            source=self.source,
-            sourceType="marketplace",
-            realSourceHost="wildberries.ru",
-            title=f"{brand} {name}".strip(),
-            brand=brand,
-            sku=str(nm_id),
-            productId=str(nm_id),
+            source=self.source, sourceType="marketplace", realSourceHost="wildberries.ru",
+            title=f"{brand} {name}".strip(), brand=brand,
+            sku=str(nm_id), productId=str(nm_id),
             category=category or p.get("subjectName") or "",
-            price=price,
-            oldPrice=old,
+            price=price, oldPrice=old,
             discountPercent=float(p.get("sale") or 0),
             seller=p.get("supplier") or p.get("supplierName") or "",
             rating=float(p.get("reviewRating") or 0),
             reviewsCount=int(p.get("feedbacks") or 0),
-            images=images,
-            mainImage=images[0] if images else "",
+            images=images, mainImage=images[0] if images else "",
             url=f"https://www.wildberries.ru/catalog/{nm_id}/detail.aspx",
-            characteristics=chars,
-            region=region,
+            characteristics=chars, region=region,
             geo=default_geo(region) | {"detectedRegion": region, "deliveryRegion": region},
         )
 
@@ -238,13 +287,6 @@ class WildberriesParser:
             item = self._from_search_product(products[0], region, category)
             if item and card_meta:
                 item.description = card_meta.get("description", "")
-                item.characteristics.update(card_meta.get("characteristics", {}))
-            return item
-        html = await fetcher.get_text(url, source=self.source, referer="https://www.wildberries.ru/", retries=0)
-        if html.text and not html.blocked:
-            item = extract_product_from_html(html.text, url, self.source)
-            if card_meta:
-                item.description = item.description or card_meta.get("description", "")
                 item.characteristics.update(card_meta.get("characteristics", {}))
             return item
         return None

@@ -4,11 +4,18 @@ import re
 from urllib.parse import quote_plus, urlparse
 
 from app.parsers.browser import fetch_rendered_html
+from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price, normalize_url
+from app.parsers.extractors import (
+    extract_characteristics_from_json,
+    extract_dom_cards,
+    extract_embedded_json,
+    extract_product_from_html,
+    extract_product_links,
+    find_products_in_json,
+)
+from app.parsers.http_client import Fetcher, browser_headers, proxy_manager
 
 logger = logging.getLogger(__name__)
-from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price, normalize_url
-from app.parsers.extractors import extract_characteristics_from_json, extract_embedded_json, extract_product_from_html, extract_product_links
-from app.parsers.http_client import Fetcher, browser_headers
 
 
 class OzonParser:
@@ -16,102 +23,140 @@ class OzonParser:
 
     async def search(self, query: str, region: str = "Москва", limit: int = 10, category: str = "") -> SourceResult:
         search_url = f"https://www.ozon.ru/search/?text={quote_plus(query)}&from_global=true"
-        search_urls = [
-            search_url,
-            f"https://www.ozon.ru/search/?from_global=true&text={quote_plus(query)}",
-            f"https://www.ozon.ru/search/?deny_category_prediction=true&text={quote_plus(query)}",
-        ]
+        logger.info("[source=ozon] query=%r region=%s limit=%d", query, region, limit)
+
         items: list[ProductItem] = []
+        blocked_reason = ""
         candidate_html = ""
 
-        _conn_errors = 0
-        _blocked_reason = ""
-        async with Fetcher() as fetcher:
-            composer = await self._composer_search(fetcher, query)
-            logger.info("[ozon] composer_found=%s", composer is not None)
-            if composer:
-                items = self._items_from_json(composer, region, category, limit)
-                logger.info("[ozon] composer_items=%d", len(items))
+        # ── 1. Browser-first WITHOUT proxy (Ozon blocks datacenter IPs, allows Russian ISPs) ──
+        try:
+            rendered = await asyncio.wait_for(
+                fetch_rendered_html(
+                    search_url,
+                    referer="https://www.ozon.ru/",
+                    warmup_url="https://www.ozon.ru/",
+                    wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]', 'article', '[class*="tile" i]'],
+                    scroll_steps=3,
+                    use_proxy=False,
+                ),
+                timeout=35,
+            )
+        except asyncio.TimeoutError:
+            rendered = None
+            blocked_reason = "browser timeout"
+        except Exception as exc:
+            rendered = None
+            blocked_reason = f"browser error: {type(exc).__name__}"
 
-            resp = None
-            if not items:
-                for url in search_urls[:2]:
+        logger.info(
+            "[source=ozon] page_loaded=%s xhr_payloads=%d xhr_product_payloads=%d status=%s",
+            rendered.page_loaded if rendered else False,
+            rendered.xhr_payloads if rendered else 0,
+            rendered.xhr_product_payloads if rendered else 0,
+            rendered.status if rendered else "none",
+        )
+
+        # ── 2. XHR product payloads ───────────────────────────────────────────
+        if rendered and rendered.product_payloads:
+            for payload in rendered.product_payloads:
+                items.extend(self._items_from_json(payload, region, category, limit - len(items)))
+                if len(items) >= limit:
+                    break
+            logger.info("[source=ozon] json_products=%d (from XHR)", len(items))
+
+        # ── 3. Ozon composer API (structured JSON) ────────────────────────────
+        if not items:
+            async with Fetcher(use_proxy=False) as fetcher:
+                composer = await self._composer_search(fetcher, query)
+                logger.info("[source=ozon] composer_found=%s", composer is not None)
+                if composer:
+                    items = self._items_from_json(composer, region, category, limit)
+                    logger.info("[source=ozon] composer_items=%d", len(items))
+
+        # ── 4. Embedded JSON in rendered HTML ─────────────────────────────────
+        embedded_products = 0
+        if not items and rendered and rendered.html:
+            candidate_html = rendered.html
+            for data in extract_embedded_json(rendered.html):
+                items.extend(self._items_from_json(data, region, category, limit - len(items)))
+                if len(items) >= limit:
+                    break
+            embedded_products = len(items)
+            logger.info("[source=ozon] embedded_products=%d", embedded_products)
+
+        # ── 5. HTTP fallback (direct, no proxy) ───────────────────────────────
+        if not items:
+            async with Fetcher(use_proxy=False) as fetcher:
+                for url in [search_url]:
                     try:
                         resp = await asyncio.wait_for(
                             fetcher.get_text(url, source=self.source, headers=browser_headers(source=self.source), retries=0),
                             timeout=12,
                         )
-                    except asyncio.TimeoutError:
-                        _conn_errors += 1
-                        _blocked_reason = _blocked_reason or "connection timeout — Ozon unreachable from current IP"
-                        continue
                     except Exception as exc:
-                        _conn_errors += 1
-                        _blocked_reason = _blocked_reason or f"connection error: {type(exc).__name__}"
+                        blocked_reason = blocked_reason or f"HTTP error: {type(exc).__name__}"
                         continue
                     if resp.text and not resp.blocked:
                         candidate_html = resp.text
-                        search_url = url
                         break
-                    if resp.blocked:
-                        _blocked_reason = _blocked_reason or f"HTTP {resp.status_code}: Ozon anti-bot"
+                    blocked_reason = blocked_reason or f"HTTP {resp.status_code}: Ozon anti-bot"
 
-            # If both HTTP attempts failed with timeout/error, still try browser fallback
-            need_browser = (_conn_errors >= 2 and not items) or (resp and resp.blocked and not items)
-            if need_browser:
+        # ── 6. Embedded JSON from HTTP HTML ───────────────────────────────────
+        if not items and candidate_html:
+            for data in extract_embedded_json(candidate_html):
+                items.extend(self._items_from_json(data, region, category, limit - len(items)))
+                if len(items) >= limit:
+                    break
+            if items:
+                logger.info("[source=ozon] embedded_products_http=%d", len(items))
+
+        # ── 7. DOM card fallback ───────────────────────────────────────────────
+        dom_cards = 0
+        if not items and candidate_html:
+            cards = extract_dom_cards(candidate_html, "https://www.ozon.ru/")
+            dom_cards = len(cards)
+            for card in cards[:limit]:
+                if card.get("title") and (card.get("price") or card.get("url")):
+                    item = ProductItem(
+                        source=self.source, sourceType="marketplace", realSourceHost="ozon.ru",
+                        title=card["title"], price=card["price"],
+                        url=card["url"] or search_url,
+                        mainImage=card["image"], images=[card["image"]] if card["image"] else [],
+                        rating=card["rating"], brand=card["brand"],
+                        productId=card["product_id"],
+                        category=category, region=region, geo=default_geo(region),
+                    )
+                    items.append(item)
+            logger.info("[source=ozon] dom_cards=%d", dom_cards)
+
+        normalized_products = len(items)
+        logger.info("[source=ozon] normalized_products=%d", normalized_products)
+
+        # ── 8. Detail enrichment ──────────────────────────────────────────────
+        async with Fetcher(use_proxy=False) as fetcher:
+            for idx, item in enumerate(items[: min(limit, 3)]):
                 try:
-                    rendered = await asyncio.wait_for(
-                        fetch_rendered_html(
-                            search_url,
-                            referer="https://www.ozon.ru/",
-                            warmup_url="https://www.ozon.ru/",
-                            wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]', '[class*="tile" i]'],
-                            scroll_steps=2,
-                        ),
-                        timeout=25,
-                    )
+                    detail = await asyncio.wait_for(self._detail(fetcher, item.url, region, category), timeout=6)
                 except Exception:
-                    rendered = None
-                if not rendered:
-                    return SourceResult(
-                        self.source,
-                        "blocked",
-                        errorReason=_blocked_reason or "Ozon anti-bot — browser fallback failed",
-                        diagnostics={"operatorAction": "configure PROXY_URL env variable to access Ozon"},
-                    )
-                logger.info("[ozon] browser_status=%s xhr_payloads=%d html_len=%d", rendered.status if rendered else "none", len(rendered.product_payloads) if rendered else 0, len(rendered.html or "") if rendered else 0)
-                if rendered.status == "blocked" and not rendered.product_payloads:
-                    return SourceResult(
-                        self.source,
-                        "blocked",
-                        errorReason="Ozon anti-bot or CAPTCHA",
-                        diagnostics={
-                            "blockedUrl": search_url,
-                            "legalFallbacksTried": ["composer_json", "html", "playwright_render", "xhr_capture"],
-                            "operatorAction": "configure PROXY_URL/PROXY_LIST env variable",
-                        },
-                    )
-                candidate_html = rendered.html or candidate_html
-                for payload in rendered.product_payloads or rendered.json_payloads:
-                    items.extend(self._items_from_json(payload, region, category, limit - len(items)))
-                if not items and candidate_html:
-                    items = self._items_from_html(candidate_html, search_url, region, category, limit)
-            if not items and candidate_html:
-                items = self._items_from_html(candidate_html, search_url, region, category, limit)
-
-            if not items:
-                links = extract_product_links(candidate_html, search_url)
-                items = await self._details_from_links(fetcher, links, region, category, limit)
-            else:
-                for idx, item in enumerate(items[: min(limit, 3)]):
-                    try:
-                        detail = await asyncio.wait_for(self._detail(fetcher, item.url, region, category), timeout=3)
-                    except Exception:
-                        detail = None
-                    items[idx] = merge_product_data(item, detail)
+                    detail = None
+                items[idx] = merge_product_data(item, detail)
 
         items = self._dedupe(items)[:limit]
-        return SourceResult(self.source, "ok" if items else "empty", len(items), "", items)
+        relevant = len([i for i in items if i.title and i.price])
+        logger.info("[source=ozon] relevant_products=%d", relevant)
+
+        if not items:
+            reason = blocked_reason or (rendered.errorReason if rendered else "no data extracted")
+            return SourceResult(
+                self.source, "blocked" if blocked_reason else "empty",
+                errorReason=reason,
+                diagnostics={
+                    "legalFallbacksTried": ["browser", "composer_api", "embedded_json", "dom_cards"],
+                    "operatorAction": "Ozon accessible from Russian IPs — check network connectivity",
+                } if blocked_reason else {},
+            )
+        return SourceResult(self.source, "ok", len(items), "", items)
 
     async def _composer_search(self, fetcher: Fetcher, query: str) -> dict | list | None:
         encoded_path = quote_plus(f"/search/?text={query}&from_global=true")
@@ -133,20 +178,35 @@ class OzonParser:
                 return resp.json_data
         return None
 
-    def _items_from_html(self, html: str, base_url: str, region: str, category: str, limit: int) -> list[ProductItem]:
-        items: list[ProductItem] = []
-        for data in extract_embedded_json(html):
-            items.extend(self._items_from_json(data, region, category, limit - len(items)))
-            if len(items) >= limit:
-                return self._dedupe(items)
-        for link in extract_product_links(html, base_url)[:limit]:
-            path_parts = [p for p in urlparse(link).path.split("/") if p]
-            title = re.sub(r"[-_]+", " ", path_parts[-2] if len(path_parts) > 1 else path_parts[-1] if path_parts else "")
-            items.append(ProductItem(source=self.source, realSourceHost="ozon.ru", title=title, url=link, region=region, category=category, geo=default_geo(region)))
-        return self._dedupe(items)
-
     def _items_from_json(self, data, region: str, category: str, limit: int) -> list[ProductItem]:
         out: list[ProductItem] = []
+        # First try find_products_in_json for structured product objects
+        raw_products = find_products_in_json(data)
+        for node in raw_products:
+            title = node.get("title") or node.get("name") or self._text(node)
+            link = self._link(node)
+            price = self._price(node)
+            if title and link and (price or "/product/" in link):
+                url = normalize_url(link, "https://www.ozon.ru/")
+                image = self._image(node)
+                out.append(ProductItem(
+                    source=self.source, sourceType="marketplace", realSourceHost="ozon.ru",
+                    title=str(title)[:300],
+                    productId=str(node.get("id") or node.get("sku") or node.get("skuId") or ""),
+                    price=price,
+                    oldPrice=normalize_price(node.get("oldPrice") or node.get("originalPrice")),
+                    images=[image] if image else [], mainImage=image or "",
+                    url=url, brand=str(node.get("brand") or ""),
+                    seller=str(node.get("seller") or ""),
+                    category=category, region=region,
+                    geo=default_geo(region) | {"detectedRegion": region},
+                    characteristics=extract_characteristics_from_json(node, limit=100),
+                ))
+            if len(out) >= limit:
+                break
+        if out:
+            return self._dedupe(out)
+        # Fallback: walk all nodes
         for node in self._walk(data):
             title = node.get("title") or node.get("name") or self._text(node)
             link = self._link(node)
@@ -155,20 +215,15 @@ class OzonParser:
                 url = normalize_url(link, "https://www.ozon.ru/")
                 image = self._image(node)
                 out.append(ProductItem(
-                    source=self.source,
-                    sourceType="marketplace",
-                    realSourceHost="ozon.ru",
+                    source=self.source, sourceType="marketplace", realSourceHost="ozon.ru",
                     title=str(title)[:300],
                     productId=str(node.get("id") or node.get("sku") or node.get("skuId") or ""),
                     price=price,
                     oldPrice=normalize_price(node.get("oldPrice") or node.get("originalPrice")),
-                    images=[image] if image else [],
-                    mainImage=image or "",
-                    url=url,
-                    brand=str(node.get("brand") or ""),
+                    images=[image] if image else [], mainImage=image or "",
+                    url=url, brand=str(node.get("brand") or ""),
                     seller=str(node.get("seller") or ""),
-                    category=category,
-                    region=region,
+                    category=category, region=region,
                     geo=default_geo(region) | {"detectedRegion": region},
                     characteristics=extract_characteristics_from_json(node, limit=100),
                 ))
@@ -176,45 +231,13 @@ class OzonParser:
                 break
         return self._dedupe(out)
 
-    async def _details_from_links(self, fetcher: Fetcher, links: list[str], region: str, category: str, limit: int) -> list[ProductItem]:
-        items: list[ProductItem] = []
-        for link in links[:limit]:
-            detail = await self._detail(fetcher, link, region, category)
-            if detail and detail.title:
-                items.append(detail)
-        return items
-
     async def _detail(self, fetcher: Fetcher, url: str, region: str, category: str) -> ProductItem | None:
         if not url:
             return None
         resp = await fetcher.get_text(url, source=self.source, referer="https://www.ozon.ru/", retries=0)
         if resp.blocked or not resp.text:
-            try:
-                rendered = await asyncio.wait_for(
-                    fetch_rendered_html(
-                        url,
-                        referer="https://www.ozon.ru/",
-                        wait_selectors=["h1", '[data-widget*="webProduct" i]', '[data-widget*="raShowcase" i]'],
-                        scroll_steps=1,
-                    ),
-                    timeout=6,
-                )
-            except Exception:
-                return None
-            if rendered.status == "blocked" and not rendered.product_payloads:
-                return None
-            if rendered.product_payloads:
-                payload_items = []
-                for payload in rendered.product_payloads:
-                    payload_items.extend(self._items_from_json(payload, region, category, 1))
-                if payload_items:
-                    return payload_items[0]
-            if not rendered.html:
-                return None
-            html = rendered.html
-        else:
-            html = resp.text
-        item = extract_product_from_html(html, url, self.source)
+            return None
+        item = extract_product_from_html(resp.text, url, self.source)
         item.sourceType = "marketplace"
         item.realSourceHost = "ozon.ru"
         item.region = region
