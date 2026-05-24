@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(gh api *)",
+      "PowerShell(gh api repos/Dub2402/ParserWbOzYa/contents/ 2>&1)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebSearch",
+      "WebFetch(domain:habr.com)"
+    ]
+  }
+}

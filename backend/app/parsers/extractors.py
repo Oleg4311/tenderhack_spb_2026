@@ -140,6 +140,13 @@ def extract_initial_state(html: str) -> list[Any]:
         r"window\.__data\s*=\s*",          # Yandex Market
         r"window\.bunker\s*=\s*",           # Yandex Market bunker
         r"window\.__SEARCH_DATA__\s*=\s*",
+        r"window\.__APOLLO_STATE__\s*=\s*",
+        r"window\.initialState\s*=\s*",
+        r"window\.initialData\s*=\s*",
+        r"window\.__hydration__\s*=\s*",
+        r"self\.__next_f\.push\(",           # Next.js flight data
+        r'"initialState"\s*:\s*',
+        r'"preloadedState"\s*:\s*',
     ]
     for pattern in patterns:
         for m in re.finditer(pattern, html or ""):
@@ -179,6 +186,60 @@ def extract_embedded_json(html: str) -> list[Any]:
         if data is not None:
             out.append(data)
     return out
+
+
+def extract_ym_apiary_products(html: str) -> list[dict]:
+    """Extract product data from Yandex Market Apiary <noframes data-apiary="patch"> blocks.
+
+    YM embeds product context (title, price, picture, productId) inside ToggleWishlist
+    and other Apiary widget patches. Each patch is a JSON block inside a <noframes> tag.
+    This extractor finds those blocks and pulls structured product data directly from them.
+    Works with the initial SSR HTML — no XHR/browser needed.
+    """
+    products: dict[str, dict] = {}
+    tag = '<noframes data-apiary="patch">'
+    parts = html.split(tag)
+    for part in parts[1:]:
+        end = part.find("</noframes>")
+        if end < 0:
+            continue
+        patch_text = part[:end]
+        try:
+            patch = json.loads(patch_text)
+        except Exception:
+            continue
+        widgets = patch.get("widgets", {})
+        if not isinstance(widgets, dict):
+            continue
+        for widget_data in widgets.values():
+            if not isinstance(widget_data, dict):
+                continue
+            for data in widget_data.values():
+                if not isinstance(data, dict):
+                    continue
+                title = data.get("title", "")
+                price_obj = data.get("price", {})
+                if not (title and isinstance(price_obj, dict) and price_obj.get("value")):
+                    continue
+                product_id = data.get("productId") or data.get("modelId") or ""
+                sku_id = str(data.get("skuId") or "")
+                key = str(product_id or sku_id or title[:60])
+                if not key or key in products:
+                    continue
+                picture = data.get("picture", "")
+                url = f"https://market.yandex.ru/product/{product_id}" if product_id else ""
+                products[key] = {
+                    "title": title,
+                    "price": price_obj.get("value", ""),
+                    "currency": price_obj.get("currency", "RUR"),
+                    "picture": picture,
+                    "skuId": sku_id,
+                    "productId": str(product_id),
+                    "url": url,
+                    "brand": data.get("brand", ""),
+                    "source": "apiary",
+                }
+    return list(products.values())
 
 
 _PRODUCT_NAME_KEYS = {"name", "title", "goodsName", "productName", "displayName", "modelName", "offerName", "itemName"}

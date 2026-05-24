@@ -4,7 +4,7 @@ from typing import Any
 
 from app.parsers.common import SOURCE_KEYS, SourceResult, calculate_completeness, calculate_relevance, relevance_breakdown
 from app.parsers.ozon import OzonParser
-from app.parsers.query_normalizer import expand_query, normalize_query
+from app.parsers.query_normalizer import detect_category_from_query, expand_query, normalize_query
 from app.parsers.runet import RunetParser, _resolve_category
 from app.parsers.wildberries import WildberriesParser
 from app.parsers.yandex_market import YandexMarketParser
@@ -70,6 +70,11 @@ def _postprocess(result: SourceResult, normalized: str, limit: int) -> SourceRes
 
 async def search_products(query: str, category: str, region: str, limit: int = 10) -> dict[str, Any]:
     category = _resolve_category(category)
+    # Auto-detect category from query keywords; overrides provided category when
+    # signal is unambiguous (e.g. "ноутбук" with category="clothes" → "office").
+    detected = detect_category_from_query(query)
+    if detected and detected != category:
+        category = detected
     normalized = normalize_query(query, category)
     expanded = expand_query(normalized, category)
     limit = max(1, min(int(limit or 10), 30))

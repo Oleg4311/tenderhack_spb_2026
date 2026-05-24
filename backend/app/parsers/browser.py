@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import pathlib
 import random
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -10,6 +11,8 @@ from app.parsers.common import detect_blocked_page
 from app.parsers.http_client import USER_AGENTS, proxy_manager
 
 logger = logging.getLogger(__name__)
+
+_COOKIE_DIR = pathlib.Path(os.getenv("BROWSER_DATA_DIR", "/tmp/browser-cookies"))
 
 # Локальный OCR для простых текстовых капч (без внешних API)
 try:
@@ -29,6 +32,30 @@ def solve_local_captcha(image_bytes: bytes) -> str:
         return _ocr.classification(image_bytes)
     except Exception:
         return ""
+
+
+async def _load_saved_cookies(context, key: str) -> None:
+    """Загружает сохранённые cookies из файла в контекст браузера."""
+    try:
+        path = _COOKIE_DIR / f"{key.replace(':', '_').replace('/', '_')}.json"
+        if path.exists():
+            cookies = json.loads(path.read_text())
+            if cookies:
+                await context.add_cookies(cookies)
+    except Exception:
+        pass
+
+
+async def _save_cookies(context, key: str) -> None:
+    """Сохраняет текущие cookies контекста на диск для переиспользования."""
+    try:
+        _COOKIE_DIR.mkdir(parents=True, exist_ok=True)
+        cookies = await context.cookies()
+        if cookies:
+            path = _COOKIE_DIR / f"{key.replace(':', '_').replace('/', '_')}.json"
+            path.write_text(json.dumps(cookies))
+    except Exception:
+        pass
 
 
 _playwright = None
@@ -330,9 +357,38 @@ async def _get_context(domain: str, use_proxy: bool = True):
         context.set_default_timeout(10_000)
         context.set_default_navigation_timeout(20_000)
         await context.add_init_script(_STEALTH_JS)
+        await _load_saved_cookies(context, ctx_key)
         _contexts[ctx_key] = context
         _context_browsers[ctx_key] = browser
         return context
+
+
+async def reset_context(domain: str, use_proxy: bool = True) -> None:
+    """Close and delete the cached browser context for domain.
+
+    Call this after detecting a block so the next request starts with a clean
+    session instead of re-using cookies that were flagged by the antibot system.
+    """
+    ctx_key = f"{domain}:{'proxy' if use_proxy else 'direct'}"
+    lock = _context_locks.get(ctx_key)
+    if lock is None:
+        return
+    async with lock:
+        ctx = _contexts.pop(ctx_key, None)
+        if ctx:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+        _context_browsers.pop(ctx_key, None)
+        _context_warmed.discard(ctx_key)
+        try:
+            path = _COOKIE_DIR / f"{ctx_key.replace(':', '_').replace('/', '_')}.json"
+            if path.exists():
+                path.unlink()
+        except Exception:
+            pass
+    logger.info("[Browser] context reset for %s (was_blocked=True)", ctx_key)
 
 
 def _looks_like_product_payload(data: dict | list) -> bool:
@@ -350,6 +406,7 @@ async def fetch_rendered_html(
     wait_selectors: list[str] | None = None,
     scroll_steps: int = 3,
     use_proxy: bool = True,
+    after_load_evaluate: str = "",
 ) -> BrowserResult:
     async with _browser_semaphore:
         domain = urlparse(url).netloc
@@ -371,8 +428,24 @@ async def fetch_rendered_html(
             if warmup_url and ctx_key not in _context_warmed:
                 _context_warmed.add(ctx_key)
                 try:
-                    await page.goto(warmup_url, wait_until="commit", timeout=3_000)
+                    await page.goto(warmup_url, wait_until="domcontentloaded", timeout=10_000)
+                    # Human-like: wait for page to render, then move mouse as if reading
+                    await page.wait_for_timeout(random.randint(1500, 2500))
+                    await page.mouse.move(
+                        random.randint(150, 600), random.randint(100, 350),
+                        steps=random.randint(12, 25),
+                    )
+                    await page.wait_for_timeout(random.randint(400, 900))
+                    await page.mouse.move(
+                        random.randint(400, 900), random.randint(200, 500),
+                        steps=random.randint(8, 18),
+                    )
+                    await page.wait_for_timeout(random.randint(300, 700))
+                    # Scroll down a bit then back, like a human checking the homepage
+                    await page.mouse.wheel(0, random.randint(200, 500))
                     await page.wait_for_timeout(random.randint(300, 600))
+                    await page.mouse.wheel(0, -random.randint(100, 300))
+                    await page.wait_for_timeout(random.randint(200, 500))
                 except Exception:
                     pass
 
@@ -443,16 +516,28 @@ async def fetch_rendered_html(
                 except Exception:
                     continue
 
+            # Умный scroll: остановиться если 2 прохода без новых product XHR
+            no_new_rounds = 0
             for i in range(max(0, scroll_steps)):
+                prev_count = len(product_payloads)
                 try:
-                    scroll_amount = random.randint(800, 1400)
-                    await page.mouse.wheel(0, scroll_amount)
-                    await page.wait_for_timeout(random.randint(400, 900))
+                    await page.mouse.wheel(0, random.randint(800, 1400))
+                    await page.wait_for_timeout(1_200)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=2_000)
+                    except Exception:
+                        pass
                 except Exception:
                     break
+                if len(product_payloads) > prev_count:
+                    no_new_rounds = 0
+                else:
+                    no_new_rounds += 1
+                    if no_new_rounds >= 2:
+                        break
 
             try:
-                await page.wait_for_load_state("networkidle", timeout=4_000)
+                await page.wait_for_load_state("networkidle", timeout=3_000)
             except Exception:
                 pass
 
@@ -476,27 +561,58 @@ async def fetch_rendered_html(
                         status="ok", errorReason="challenge page but XHR product payloads captured",
                         **_counters,
                     )
-                try:
-                    await page.wait_for_timeout(3_000)
-                    await page.wait_for_load_state("networkidle", timeout=4_000)
-                except Exception:
-                    pass
-                html2 = await page.content()
-                _counters["page_loaded"] = bool(html2)
-                if not detect_blocked_page(html2, status_code):
-                    return BrowserResult(html=html2, json_payloads=payloads, product_payloads=product_payloads, status="ok", **_counters)
+                # JS challenge: give up to ~12s for the page to auto-resolve.
+                # Some sites (Ozon, YM) run a proof-of-work JS challenge that
+                # completes in 3–10 s and then redirects to the real page.
+                html_latest = html
+                for _wait_round in range(3):
+                    try:
+                        await page.wait_for_timeout(4_000)
+                        await page.wait_for_load_state("networkidle", timeout=3_000)
+                    except Exception:
+                        pass
+                    # XHR product data captured during challenge resolution counts as success
+                    if product_payloads:
+                        html_latest = await page.content()
+                        _counters["page_loaded"] = bool(html_latest)
+                        return BrowserResult(
+                            html=html_latest, json_payloads=payloads, product_payloads=product_payloads,
+                            status="ok", errorReason="challenge resolved, XHR products captured",
+                            **_counters,
+                        )
+                    html_latest = await page.content()
+                    _counters["page_loaded"] = bool(html_latest)
+                    if not detect_blocked_page(html_latest, status_code):
+                        return BrowserResult(html=html_latest, json_payloads=payloads, product_payloads=product_payloads, status="ok", **_counters)
                 if product_payloads:
                     return BrowserResult(
-                        html=html2, json_payloads=payloads, product_payloads=product_payloads,
+                        html=html_latest, json_payloads=payloads, product_payloads=product_payloads,
                         status="ok", errorReason="challenge page but XHR product payloads captured",
                         **_counters,
                     )
+                # Confirmed block — reset context so next call starts with clean session
+                asyncio.ensure_future(reset_context(domain, use_proxy))
                 return BrowserResult(
-                    html=html2, json_payloads=payloads, product_payloads=product_payloads,
+                    html=html_latest, json_payloads=payloads, product_payloads=product_payloads,
                     status="blocked", errorReason="CAPTCHA or access restriction after JS challenge wait",
                     **_counters,
                 )
 
+            # after_load_evaluate: run caller-supplied JS and capture result as product payload
+            if after_load_evaluate:
+                try:
+                    eval_result = await page.evaluate(after_load_evaluate)
+                    if isinstance(eval_result, (dict, list)) and eval_result:
+                        payloads.append(eval_result)
+                        if _looks_like_product_payload(eval_result):
+                            product_payloads.append(eval_result)
+                            _counters["xhr_product_payloads"] = len(product_payloads)
+                        _counters["xhr_payloads"] = len(payloads)
+                except Exception as eval_exc:
+                    logger.debug("[Browser] after_load_evaluate failed: %s", eval_exc)
+
+            # Сохраняем cookies после успешной загрузки (не заблокированной)
+            asyncio.ensure_future(_save_cookies(page.context, ctx_key))
             return BrowserResult(
                 html=html, json_payloads=payloads, product_payloads=product_payloads,
                 status="ok" if html else "empty", **_counters,

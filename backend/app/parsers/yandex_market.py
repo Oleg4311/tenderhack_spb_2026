@@ -2,13 +2,15 @@ import asyncio
 import logging
 from urllib.parse import quote_plus
 
-from app.parsers.browser import fetch_rendered_html
+from app.parsers.browser import fetch_rendered_html, reset_context
 from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price, normalize_url
 from app.parsers.extractors import (
     extract_characteristics_from_json,
     extract_dom_cards,
     extract_embedded_json,
+    extract_initial_state,
     extract_product_from_html,
+    extract_ym_apiary_products,
     find_products_in_json,
 )
 from app.parsers.http_client import Fetcher, browser_headers
@@ -32,13 +34,14 @@ class YandexMarketParser:
         rendered = None
 
         # ── 1. HTTP direct (no proxy) — fast, YM often allows direct connections ──
+        # Используем Google referer: market.yandex.ru referer триггерит VPN-блок.
+        # Фиктивные Region-cookies также вызывают 403 — не добавляем их.
         async with Fetcher(use_proxy=False) as fetcher:
-            headers = browser_headers(source=self.source)
-            headers["Cookie"] = f"_region_id={rid}; yandex_gid={rid}; my={rid};"
+            headers = browser_headers(referer="https://www.google.com/")
             try:
                 resp = await asyncio.wait_for(
-                    fetcher.get_text(search_url, source=self.source, headers=headers, retries=0),
-                    timeout=8,
+                    fetcher.get_text(search_url, headers=headers, retries=0),
+                    timeout=12,
                 )
             except Exception as exc:
                 blocked_reason = f"HTTP error: {type(exc).__name__}"
@@ -46,37 +49,60 @@ class YandexMarketParser:
             if resp and resp.text and not resp.blocked:
                 candidate_html = resp.text
                 logger.info("[source=ym] http_direct status=%d len=%d", resp.status_code, len(resp.text))
-                for data in extract_embedded_json(candidate_html):
-                    items.extend(self._items_from_json(data, region, category, limit - len(items)))
-                    if len(items) >= limit:
-                        break
+                # Приоритет 1: Apiary noframes patches — самый надёжный источник данных на SSR странице
+                apiary_items = self._items_from_apiary(extract_ym_apiary_products(candidate_html), region, category)
+                items.extend(apiary_items[:limit])
+                logger.info("[source=ym] http_apiary_products=%d", len(items))
+                # Приоритет 2: __PRELOADED_STATE__ / initialState
+                if not items:
+                    for data in extract_initial_state(candidate_html):
+                        items.extend(self._items_from_json(data, region, category, limit - len(items)))
+                        if len(items) >= limit:
+                            break
+                # Приоритет 3: все остальные embedded JSON
+                if not items:
+                    for data in extract_embedded_json(candidate_html):
+                        items.extend(self._items_from_json(data, region, category, limit - len(items)))
+                        if len(items) >= limit:
+                            break
                 logger.info("[source=ym] http_direct_products=%d", len(items))
             elif resp:
                 blocked_reason = f"HTTP {resp.status_code}: YM anti-bot / VPN flag"
 
-        # ── 2. Browser WITHOUT proxy (single attempt, 25s) ────────────────────
+        # ── 2. Browser: direct first (warmup yandex.ru для сессионных cookies) ─
+        # Persistent context хранит Яндекс-cookies между запросами.
+        # Scroll 4 раза с отслеживанием новых XHR.
         if not items:
-            try:
-                rendered = await asyncio.wait_for(
-                    fetch_rendered_html(
-                        search_url,
-                        referer="https://market.yandex.ru/",
-                        warmup_url="https://market.yandex.ru/",
-                        wait_selectors=[
-                            '[data-zone-name*="product" i]', '[data-zone-name="snippet"]',
-                            'article', '[data-auto*="product" i]', 'a[href*="/product"]',
-                        ],
-                        scroll_steps=3,
-                        use_proxy=False,
-                    ),
-                    timeout=28,
-                )
-            except asyncio.TimeoutError:
-                rendered = None
-                blocked_reason = blocked_reason or "browser timeout"
-            except Exception as exc:
-                rendered = None
-                blocked_reason = blocked_reason or f"browser error: {type(exc).__name__}"
+            for use_proxy in (False, True):
+                # Warmup yandex.ru даёт cross-domain cookies для market.yandex.ru
+                warmup = "https://yandex.ru/" if not use_proxy else "https://market.yandex.ru/"
+                try:
+                    rendered = await asyncio.wait_for(
+                        fetch_rendered_html(
+                            search_url,
+                            referer="https://market.yandex.ru/",
+                            warmup_url=warmup,
+                            wait_selectors=[
+                                '[data-zone-name*="product" i]', '[data-zone-name="snippet"]',
+                                'article', '[data-auto*="product" i]', 'a[href*="/product"]',
+                            ],
+                            scroll_steps=4,
+                            use_proxy=use_proxy,
+                        ),
+                        timeout=32,
+                    )
+                except asyncio.TimeoutError:
+                    rendered = None
+                    blocked_reason = blocked_reason or "browser timeout"
+                    break  # таймаут — не пробуем второй IP, в сумме превысим 45s
+                except Exception as exc:
+                    rendered = None
+                    blocked_reason = blocked_reason or f"browser error: {type(exc).__name__}"
+                    continue
+                if rendered and rendered.status != "blocked":
+                    break
+                blocked_reason = blocked_reason or (rendered.errorReason if rendered else "blocked")
+                asyncio.ensure_future(reset_context("market.yandex.ru", use_proxy=use_proxy))
 
             logger.info(
                 "[source=ym] page_loaded=%s xhr_payloads=%d xhr_product_payloads=%d status=%s",
@@ -97,7 +123,21 @@ class YandexMarketParser:
                         break
                 logger.info("[source=ym] json_products=%d (from XHR)", len(items))
 
-            # Embedded JSON from browser HTML
+            # Apiary patches из browser HTML
+            if not items and candidate_html:
+                apiary_items = self._items_from_apiary(extract_ym_apiary_products(candidate_html), region, category)
+                items.extend(apiary_items[:limit])
+                logger.info("[source=ym] browser_apiary_products=%d", len(items))
+
+            # __PRELOADED_STATE__ / initialState / __NEXT_DATA__ (YM хранит данные в этих переменных)
+            if not items and candidate_html:
+                for data in extract_initial_state(candidate_html):
+                    items.extend(self._items_from_json(data, region, category, limit - len(items)))
+                    if len(items) >= limit:
+                        break
+                logger.info("[source=ym] initial_state_products=%d", len(items))
+
+            # Все остальные embedded JSON в <script> тегах
             if not items and candidate_html:
                 for data in extract_embedded_json(candidate_html):
                     items.extend(self._items_from_json(data, region, category, limit - len(items)))
@@ -171,6 +211,29 @@ class YandexMarketParser:
                 } if blocked_reason else {},
             )
         return SourceResult(self.source, "ok", len(items), "", items)
+
+    def _items_from_apiary(self, apiary_products: list[dict], region: str, category: str) -> list[ProductItem]:
+        out: list[ProductItem] = []
+        for p in apiary_products:
+            title = p.get("title", "")
+            if not title:
+                continue
+            price = normalize_price(p.get("price"))
+            url = p.get("url") or ""
+            product_id = p.get("productId") or p.get("skuId") or ""
+            image = normalize_url(p.get("picture") or "") if p.get("picture") else ""
+            out.append(ProductItem(
+                source=self.source, sourceType="marketplace", realSourceHost="market.yandex.ru",
+                title=str(title)[:300],
+                brand=str(p.get("brand") or ""),
+                productId=str(product_id),
+                price=price,
+                images=[image] if image else [], mainImage=image,
+                url=normalize_url(url, "https://market.yandex.ru/") if url else "",
+                category=category, region=region,
+                geo=default_geo(region) | {"detectedRegion": region},
+            ))
+        return self._dedupe(out)
 
     def _items_from_json(self, data, region: str, category: str, limit: int) -> list[ProductItem]:
         out: list[ProductItem] = []

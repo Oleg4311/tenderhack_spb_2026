@@ -1,9 +1,8 @@
 import asyncio
-import json
 import logging
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus
 
-from app.parsers.browser import fetch_rendered_html
+from app.parsers.browser import fetch_rendered_html, reset_context
 from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price, normalize_url
 from app.parsers.extractors import (
     extract_characteristics_from_json,
@@ -29,55 +28,87 @@ class OzonParser:
         candidate_html = ""
         rendered = None
 
-        # ── 1. Ozon composer API (direct, no proxy — fastest path) ───────────
-        async with Fetcher(use_proxy=False) as fetcher:
-            composer = await self._composer_search(fetcher, query)
-            logger.info("[source=ozon] composer_found=%s", composer is not None)
-            if composer:
-                for widget_data in self._expand_widget_states(composer):
-                    items.extend(self._items_from_json(widget_data, region, category, limit - len(items)))
-                    if len(items) >= limit:
-                        break
-                if not items:
-                    items.extend(self._items_from_json(composer, region, category, limit))
-                logger.info("[source=ozon] composer_items=%d", len(items))
+        # JS snippet evaluated inside browser after page loads — fetches Ozon composer API
+        # using the session cookies already set by the browser, so it looks like a real XHR.
+        _OZON_COMPOSER_JS = """
+async () => {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const text = params.get('text') || '';
+        const apiUrl = 'https://api.ozon.ru/composer-api.bx/page/json/v2?url='
+            + encodeURIComponent('/search/?text=' + encodeURIComponent(text) + '&from_global=true');
+        const resp = await fetch(apiUrl, {
+            method: 'GET',
+            credentials: 'include',
+            headers: {
+                'Accept': 'application/json',
+                'x-o3-app-name': 'ozonweb',
+                'x-o3-app-version': '2.0',
+                'x-o3-language': 'ru',
+            },
+        });
+        if (!resp.ok) return null;
+        return await resp.json();
+    } catch(e) { return null; }
+}
+"""
 
-        # ── 2. Browser with proxy (Playwright through proxy handles challenges better) ──
-        if not items:
+        # ── 1. Playwright primary: proxy first, then direct ───────────────────
+        # Persistent context хранит cookies между запросами (обход JS-challenge).
+        # Scroll 4 раза с отслеживанием новых XHR — останавливаемся если нет прироста.
+        for use_proxy in (True, False):
             try:
                 rendered = await asyncio.wait_for(
                     fetch_rendered_html(
                         search_url,
                         referer="https://www.ozon.ru/",
                         warmup_url="https://www.ozon.ru/",
-                        wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]', 'article', '[class*="tile" i]'],
-                        scroll_steps=3,
-                        use_proxy=True,
+                        wait_selectors=[
+                            'a[href*="/product/"]',
+                            '[data-widget*="searchResults" i]',
+                            'article',
+                            '[class*="tile" i]',
+                        ],
+                        scroll_steps=4,
+                        use_proxy=use_proxy,
+                        after_load_evaluate=_OZON_COMPOSER_JS,
                     ),
-                    timeout=28,
+                    timeout=42,
                 )
             except asyncio.TimeoutError:
                 rendered = None
                 blocked_reason = blocked_reason or "browser timeout"
+                break  # таймаут — не пробуем второй IP
             except Exception as exc:
                 rendered = None
                 blocked_reason = blocked_reason or f"browser error: {type(exc).__name__}"
+                continue
 
             logger.info(
-                "[source=ozon] page_loaded=%s xhr_payloads=%d xhr_product_payloads=%d status=%s",
+                "[source=ozon] proxy=%s page_loaded=%s xhr_payloads=%d xhr_product_payloads=%d status=%s",
+                use_proxy,
                 rendered.page_loaded if rendered else False,
                 rendered.xhr_payloads if rendered else 0,
                 rendered.xhr_product_payloads if rendered else 0,
                 rendered.status if rendered else "none",
             )
 
+            if rendered and rendered.status == "blocked":
+                blocked_reason = blocked_reason or rendered.errorReason or "captcha/blocked"
+                # Reset context explicitly for the other proxy mode too so both are clean
+                asyncio.ensure_future(reset_context("www.ozon.ru", use_proxy=not use_proxy))
+                # captcha/403 — не долбим второй IP, сразу переходим к HTTP fallback
+                break
+
+            # XHR: widgetStates / tileGrid / searchResults приходят через JSON
             if rendered and rendered.product_payloads:
                 for payload in rendered.product_payloads:
                     items.extend(self._items_from_json(payload, region, category, limit - len(items)))
                     if len(items) >= limit:
                         break
-                logger.info("[source=ozon] json_products=%d (from XHR)", len(items))
+                logger.info("[source=ozon] xhr_products=%d (proxy=%s)", len(items), use_proxy)
 
+            # Embedded JSON из HTML страницы
             if not items and rendered and rendered.html:
                 candidate_html = rendered.html
                 for data in extract_embedded_json(rendered.html):
@@ -86,15 +117,20 @@ class OzonParser:
                         break
                 logger.info("[source=ozon] embedded_products=%d", len(items))
 
-            if rendered and rendered.status == "blocked":
-                blocked_reason = blocked_reason or rendered.errorReason or "blocked"
+            if items:
+                break  # нашли товары — не пробуем второй IP
 
-        # ── 3. HTTP fallback (direct, no proxy) ───────────────────────────────
+        # ── 2. HTTP fallback (иногда Ozon отдаёт HTML без блокировки) ─────────
         if not items:
             async with Fetcher(use_proxy=False) as fetcher:
                 try:
                     resp = await asyncio.wait_for(
-                        fetcher.get_text(search_url, source=self.source, headers=browser_headers(source=self.source), retries=0),
+                        fetcher.get_text(
+                            search_url,
+                            source=self.source,
+                            headers=browser_headers(source=self.source),
+                            retries=0,
+                        ),
                         timeout=10,
                     )
                 except Exception as exc:
@@ -105,7 +141,7 @@ class OzonParser:
                 elif resp:
                     blocked_reason = blocked_reason or f"HTTP {resp.status_code}: Ozon anti-bot"
 
-        # Embedded JSON from HTTP HTML
+        # Embedded JSON из HTTP HTML
         if not items and candidate_html:
             for data in extract_embedded_json(candidate_html):
                 items.extend(self._items_from_json(data, region, category, limit - len(items)))
@@ -114,7 +150,7 @@ class OzonParser:
             if items:
                 logger.info("[source=ozon] embedded_products_http=%d", len(items))
 
-        # ── 4. DOM card fallback ───────────────────────────────────────────────
+        # ── 3. DOM cards fallback ──────────────────────────────────────────────
         if not items and candidate_html:
             cards = extract_dom_cards(candidate_html, "https://www.ozon.ru/")
             for card in cards[:limit]:
@@ -131,15 +167,16 @@ class OzonParser:
                     items.append(item)
             logger.info("[source=ozon] dom_cards=%d", len(items))
 
-        normalized_products = len(items)
-        logger.info("[source=ozon] normalized_products=%d", normalized_products)
+        logger.info("[source=ozon] normalized_products=%d", len(items))
 
-        # ── 5. Detail enrichment — only when fast path (composer) was used ────
+        # ── 4. Detail enrichment — только когда browser не использовался ──────
         if items and rendered is None:
             async with Fetcher(use_proxy=False) as fetcher:
                 for idx, item in enumerate(items[: min(limit, 2)]):
                     try:
-                        detail = await asyncio.wait_for(self._detail(fetcher, item.url, region, category), timeout=4)
+                        detail = await asyncio.wait_for(
+                            self._detail(fetcher, item.url, region, category), timeout=4
+                        )
                     except Exception:
                         detail = None
                     items[idx] = merge_product_data(item, detail)
@@ -151,52 +188,15 @@ class OzonParser:
         if not items:
             reason = blocked_reason or (rendered.errorReason if rendered else "no data extracted")
             return SourceResult(
-                self.source, "blocked" if blocked_reason else "empty",
+                self.source,
+                "blocked" if blocked_reason else "empty",
                 errorReason=reason,
                 diagnostics={
-                    "legalFallbacksTried": ["composer_api", "browser_direct", "browser_proxy", "embedded_json", "dom_cards"],
-                    "operatorAction": "Ozon accessible from Russian IPs — check network connectivity",
+                    "legalFallbacksTried": ["browser_proxy", "browser_direct", "http_direct", "embedded_json", "dom_cards"],
+                    "operatorAction": "Ozon accessible from Russian IPs — check network connectivity or use residential proxy",
                 } if blocked_reason else {},
             )
         return SourceResult(self.source, "ok", len(items), "", items)
-
-    def _expand_widget_states(self, data: dict) -> list:
-        """Ozon composer API stores each section as widgetStates[name] = stringified JSON."""
-        widget_states = data.get("widgetStates") if isinstance(data, dict) else None
-        if not isinstance(widget_states, dict):
-            return []
-        result = []
-        for value in widget_states.values():
-            if isinstance(value, str) and value.lstrip()[:1] in "{[":
-                try:
-                    parsed = json.loads(value)
-                    if isinstance(parsed, (dict, list)):
-                        result.append(parsed)
-                except Exception:
-                    pass
-            elif isinstance(value, (dict, list)):
-                result.append(value)
-        return result
-
-    async def _composer_search(self, fetcher: Fetcher, query: str) -> dict | list | None:
-        encoded_path = quote_plus(f"/search/?text={query}&from_global=true")
-        endpoints = [
-            f"https://www.ozon.ru/api/composer-api.bx/page/json/v2?url={encoded_path}",
-            f"https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=/search/?text={quote_plus(query)}&from_global=true",
-        ]
-        headers = browser_headers("https://www.ozon.ru/", self.source)
-        headers["Accept"] = "application/json, text/plain, */*"
-        for endpoint in endpoints:
-            try:
-                resp = await asyncio.wait_for(
-                    fetcher.get_json(endpoint, source=self.source, headers=headers, retries=0),
-                    timeout=8,
-                )
-            except Exception:
-                continue
-            if resp.json_data and not resp.blocked:
-                return resp.json_data
-        return None
 
     def _items_from_json(self, data, region: str, category: str, limit: int) -> list[ProductItem]:
         out: list[ProductItem] = []

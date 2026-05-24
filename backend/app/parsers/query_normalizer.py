@@ -24,6 +24,100 @@ SYNONYMS = {
     "мужская футболка": ["футболка муж", "футболка мужская"],
 }
 
+# Keyword signals for auto-detecting category from query text.
+# Each entry is a (pattern, category, weight) tuple; pattern can be a plain
+# substring or a regex (prefixed with "re:").
+_CATEGORY_SIGNALS: list[tuple[str, str, int]] = [
+    # ── Tires (strong) ────────────────────────────────────────────────────────
+    ("шин", "tires", 3),
+    ("покрышк", "tires", 3),
+    ("резин", "tires", 2),
+    (r"re:\b[rR]\d{2}\b", "tires", 3),
+    (r"re:\d{3}/\d{2}", "tires", 4),
+    ("всесезонн", "tires", 2),
+    ("зимн.*шин", "tires", 3),
+    ("летн.*шин", "tires", 3),
+    # ── Office / Electronics (strong) ─────────────────────────────────────────
+    ("ноутбук", "office", 4),
+    ("нотбук", "office", 4),
+    ("принтер", "office", 4),
+    ("мфу", "office", 4),
+    ("компьютер", "office", 4),
+    ("монитор", "office", 3),
+    ("планшет", "office", 3),
+    ("смартфон", "office", 4),
+    ("телефон", "office", 3),
+    ("клавиатур", "office", 3),
+    ("видеокарт", "office", 4),
+    ("процессор", "office", 4),
+    (r"re:\bssd\b", "office", 4),
+    (r"re:\bhdd\b", "office", 4),
+    ("ксерокс", "office", 4),
+    ("сканер", "office", 3),
+    ("картридж", "office", 4),
+    ("тонер", "office", 3),
+    ("наушник", "office", 3),
+    ("колонк", "office", 3),
+    ("флешк", "office", 3),
+    ("роутер", "office", 4),
+    ("канцелярия", "office", 2),
+    ("степлер", "office", 3),
+    ("калькулятор", "office", 3),
+    ("бумаг", "office", 2),
+    ("ручк", "office", 1),
+    ("тетрад", "office", 2),
+    # ── Clothes / Shoes (strong) ──────────────────────────────────────────────
+    ("куртк", "clothes", 4),
+    ("пальто", "clothes", 4),
+    ("пиджак", "clothes", 4),
+    ("платье", "clothes", 4),
+    ("юбк", "clothes", 4),
+    ("брюк", "clothes", 3),
+    ("джинс", "clothes", 4),
+    ("футболк", "clothes", 3),
+    ("свитер", "clothes", 4),
+    ("толстовк", "clothes", 4),
+    ("рубашк", "clothes", 3),
+    ("жилет", "clothes", 3),
+    ("худи", "clothes", 4),
+    ("пуховик", "clothes", 4),
+    ("кроссовк", "clothes", 4),
+    ("ботинк", "clothes", 4),
+    ("туфл", "clothes", 4),
+    ("сапог", "clothes", 4),
+    ("кед", "clothes", 3),
+    ("босоножк", "clothes", 4),
+    ("носк", "clothes", 3),
+    ("колготк", "clothes", 3),
+    ("одежд", "clothes", 2),
+    ("обувь", "clothes", 3),
+    ("пальто", "clothes", 4),
+    ("плащ", "clothes", 3),
+    ("шорт", "clothes", 3),
+]
+
+
+def detect_category_from_query(query: str) -> str | None:
+    """Определяет категорию по ключевым словам запроса.
+
+    Возвращает 'tires', 'office', 'clothes' или None если сигналов нет.
+    """
+    q = query.lower()
+    scores: dict[str, int] = {}
+    for pattern, cat, weight in _CATEGORY_SIGNALS:
+        if pattern.startswith("re:"):
+            hit = bool(re.search(pattern[3:], q))
+        else:
+            hit = pattern in q
+        if hit:
+            scores[cat] = scores.get(cat, 0) + weight
+    if not scores:
+        return None
+    best_cat = max(scores, key=scores.get)
+    best_score = scores[best_cat]
+    # Require minimum score to avoid false positives on ambiguous queries
+    return best_cat if best_score >= 2 else None
+
 
 def normalize_query(query: str, category: str = "") -> str:
     text = (query or "").lower().strip()
@@ -100,7 +194,7 @@ def _clothes_variants(query: str) -> list[str]:
 
 def _office_variants(query: str) -> list[str]:
     variants = []
-    brands = "canon hp xerox brother epson kyocera pantum".split()
+    brands = "canon hp xerox brother epson kyocera pantum lenovo hp dell asus acer samsung lg".split()
     for brand in brands:
         if brand in query:
             variants.append(query.replace(brand, "").strip())
