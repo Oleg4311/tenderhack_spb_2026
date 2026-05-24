@@ -238,30 +238,28 @@ class RunetParser:
                 links = await asyncio.wait_for(self._discover_links_from_sitemaps(fetcher, host, query, category, limit * 3), timeout=4)
             except Exception:
                 links = []
-        for i, link in enumerate(links[:limit]):
+        async def _fetch_detail_page(link: str) -> ProductItem | None:
+            detail_html = ""
             if host in BROWSER_FIRST_HOSTS:
-                # Human-like pause between product page visits; first page has no delay
-                if i > 0:
-                    await asyncio.sleep(random.uniform(0.8, 2.0))
                 try:
                     rendered = await asyncio.wait_for(
                         fetch_rendered_html(link, referer=base_url, wait_selectors=["h1", ".product", ".price"], scroll_steps=1),
-                        timeout=8,
+                        timeout=7,
                     )
                 except Exception:
-                    continue
+                    return None
                 if not rendered or rendered.status in ("blocked", "error") or not rendered.html:
-                    continue
+                    return None
                 detail_html = rendered.html
             else:
                 try:
                     detail = await asyncio.wait_for(
                         fetcher.get_text(link, source=self.source, referer=base_url, retries=0),
-                        timeout=8,
+                        timeout=6,
                     )
                 except Exception:
-                    continue
-                detail_html = detail.text
+                    return None
+                detail_html = detail.text or ""
                 if detail.blocked or not detail_html:
                     try:
                         rendered = await asyncio.wait_for(
@@ -270,14 +268,12 @@ class RunetParser:
                         )
                     except Exception:
                         rendered = None
-                    if not rendered:
-                        continue
-                    if rendered.status == "blocked" or not rendered.html:
-                        continue
+                    if not rendered or rendered.status == "blocked" or not rendered.html:
+                        return None
                     detail_html = rendered.html
             item = extract_product_from_html(detail_html, link, self.source)
             if not item.title and not item.price:
-                continue
+                return None
             item.source = self.source
             item.sourceType = "runet"
             item.realSourceHost = urlparse(link).netloc
@@ -286,9 +282,14 @@ class RunetParser:
             item.geo = default_geo(region) | {k: v for k, v in item.geo.items() if v}
             self._apply_host_adapter(item, detail_html, adapter)
             self._enrich_geo_availability(item, detail_html, region)
-            items.append(item)
-            if len(items) >= limit:
-                break
+            return item
+
+        # Parallel detail fetching — up to 4 concurrent per host
+        detail_tasks = [_fetch_detail_page(link) for link in links[:limit]]
+        detail_results = await asyncio.gather(*detail_tasks, return_exceptions=True)
+        for result in detail_results:
+            if isinstance(result, ProductItem):
+                items.append(result)
         return items
 
     def _item_from_raw(self, raw: dict, host: str, base_url: str, region: str, category: str, adapter: dict) -> ProductItem | None:

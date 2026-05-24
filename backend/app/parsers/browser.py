@@ -239,6 +239,86 @@ _STEALTH_JS = """
     if (_patchedFuncs.has(this)) return _patchedFuncs.get(this);
     return _nativeToString.call(this);
   };
+
+  // 15. Kasada: clean CDP/Playwright artifact globals
+  ['__playwright_target_id__', '__playwright', 'cdc_adoQpoasnfa76pfcZLmcfl_Promise',
+   '__cdc_asdjflasutopfhvcZLmcfl_', '__webdriver_script_fn', 'callPhantom',
+   '_phantom', '__nightmare', 'domAutomation', 'domAutomationController'].forEach(function(key) {
+    try { if (key in window) delete window[key]; } catch(e) {}
+    try { if (key in document) delete document[key]; } catch(e) {}
+  });
+
+  // 16. outerWidth/outerHeight — headless sets them to 0, Kasada checks this
+  try {
+    if (!window.outerHeight || window.outerHeight < 100) {
+      Object.defineProperty(window, 'outerHeight', { get: function() { return 768; }, configurable: true });
+    }
+    if (!window.outerWidth || window.outerWidth < 100) {
+      Object.defineProperty(window, 'outerWidth', { get: function() { return 1366; }, configurable: true });
+    }
+  } catch(e) {}
+
+  // 17. Battery API — headless Chrome usually lacks it; real Chrome has it
+  if (!navigator.getBattery) {
+    navigator.getBattery = function() {
+      return Promise.resolve({
+        charging: true, chargingTime: 0, dischargingTime: Infinity, level: 0.97,
+        onchargingchange: null, onchargingtimechange: null,
+        ondischargingtimechange: null, onlevelchange: null,
+        addEventListener: function() {}, removeEventListener: function() {},
+      });
+    };
+  }
+
+  // 18. document.hasFocus() / visibilityState — headless window is never "focused"
+  try {
+    document.hasFocus = function() { return true; };
+    Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+    Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+  } catch(e) {}
+
+  // 19. screen.orientation — sometimes absent in headless
+  try {
+    if (!screen.orientation || !screen.orientation.type) {
+      Object.defineProperty(screen, 'orientation', {
+        get: function() { return { type: 'landscape-primary', angle: 0,
+          addEventListener: function() {}, removeEventListener: function() {}, dispatchEvent: function() { return true; } }; },
+        configurable: true,
+      });
+    }
+  } catch(e) {}
+
+  // 20. CSS.paintWorklet — present in real Chrome
+  try {
+    if (typeof CSS !== 'undefined' && !CSS.paintWorklet) {
+      Object.defineProperty(CSS, 'paintWorklet', {
+        get: function() { return { addModule: function() { return Promise.resolve(); } }; },
+        configurable: true,
+      });
+    }
+  } catch(e) {}
+
+  // 21. navigator.userActivation — real pages show interaction history
+  try {
+    if (!navigator.userActivation) {
+      Object.defineProperty(navigator, 'userActivation', {
+        get: function() { return { hasBeenActive: true, isActive: true }; },
+        configurable: true,
+      });
+    }
+  } catch(e) {}
+
+  // 22. window.chrome.runtime — Kasada probes extension runtime
+  try {
+    if (window.chrome && !window.chrome.runtime) {
+      window.chrome.runtime = {
+        id: undefined,
+        connect: function() { return {}; },
+        sendMessage: function() {},
+        onMessage: { addListener: function() {}, removeListener: function() {} },
+      };
+    }
+  } catch(e) {}
 })();
 """
 
@@ -406,6 +486,7 @@ async def fetch_rendered_html(
     wait_selectors: list[str] | None = None,
     scroll_steps: int = 3,
     use_proxy: bool = True,
+    block_assets: bool = True,
     after_load_evaluate: str = "",
 ) -> BrowserResult:
     async with _browser_semaphore:
@@ -451,7 +532,7 @@ async def fetch_rendered_html(
 
             async def route_handler(route):
                 try:
-                    if route.request.resource_type in {"image", "media"}:
+                    if block_assets and route.request.resource_type in {"image", "media"}:
                         await route.abort()
                     else:
                         await route.continue_()

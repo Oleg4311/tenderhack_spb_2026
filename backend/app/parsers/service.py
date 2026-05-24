@@ -26,10 +26,10 @@ async def _run_source(source: str, query: str, expanded: list[str], category: st
     started = time.perf_counter()
     try:
         parser = PARSERS[source]()
-        result = await asyncio.wait_for(parser.search(query, region=region, limit=limit, category=category), timeout=45)
+        result = await asyncio.wait_for(parser.search(query, region=region, limit=limit, category=category), timeout=75)
         if result.status == "empty" and source != "runet":
             for variant in expanded[1:3]:
-                result = await asyncio.wait_for(parser.search(variant, region=region, limit=limit, category=category), timeout=25)
+                result = await asyncio.wait_for(parser.search(variant, region=region, limit=limit, category=category), timeout=45)
                 if result.items or result.status == "blocked":
                     break
         latency = int((time.perf_counter() - started) * 1000)
@@ -42,8 +42,8 @@ async def _run_source(source: str, query: str, expanded: list[str], category: st
         }
         return result
     except asyncio.TimeoutError:
-        HEALTH[source] = {"source": source, "status": "error", "lastError": "source timeout > 45s", "lastLatencyMs": int((time.perf_counter() - started) * 1000), "lastItemsCount": 0}
-        return SourceResult(source, "error", errorReason="source timeout > 45s")
+        HEALTH[source] = {"source": source, "status": "error", "lastError": "source timeout > 75s", "lastLatencyMs": int((time.perf_counter() - started) * 1000), "lastItemsCount": 0}
+        return SourceResult(source, "error", errorReason="source timeout > 75s")
     except Exception as exc:
         HEALTH[source] = {"source": source, "status": "error", "lastError": str(exc), "lastLatencyMs": int((time.perf_counter() - started) * 1000), "lastItemsCount": 0}
         return SourceResult(source, "error", errorReason=str(exc))
@@ -57,7 +57,7 @@ def _postprocess(result: SourceResult, normalized: str, limit: int) -> SourceRes
         item.relevanceDetails = relevance_breakdown(normalized, item)
         if not item.title or not item.url:
             continue
-        if item.relevanceScore < 0.03 and len(normalized) > 3:
+        if item.relevanceScore < 0.03 and len(normalized) >= 3:
             continue
         cleaned.append(item)
     cleaned.sort(key=lambda x: (-x.relevanceScore, -x.completenessScore, x.price or 10**12))
@@ -83,7 +83,7 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
         source: asyncio.create_task(_run_source(source, normalized, expanded, category, region, limit))
         for source in SOURCE_KEYS
     }
-    done, pending = await asyncio.wait(tasks.values(), timeout=55)
+    done, pending = await asyncio.wait(tasks.values(), timeout=85)
     for task in pending:
         task.cancel()
     if pending:
@@ -95,7 +95,7 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
             value = task.result()
             raw_by_source[source] = value if isinstance(value, SourceResult) else SourceResult(source, "error", errorReason=str(value))
         else:
-            raw_by_source[source] = SourceResult(source, "error", errorReason="global timeout > 30s")
+            raw_by_source[source] = SourceResult(source, "error", errorReason="global timeout > 85s")
     raw = [raw_by_source[source] for source in SOURCE_KEYS]
 
     groups = {}

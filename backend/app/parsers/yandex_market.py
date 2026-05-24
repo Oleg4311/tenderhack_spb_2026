@@ -360,10 +360,19 @@ class YandexMarketParser:
         return ""
 
     def _dedupe(self, items: list[ProductItem]) -> list[ProductItem]:
-        seen, out = set(), []
+        seen_urls: set[str] = set()
+        seen_images: set[str] = set()
+        out = []
         for item in items:
-            key = (item.url or item.title).split("?")[0]
-            if key and key not in seen:
-                seen.add(key)
-                out.append(item)
+            url_key = (item.url or item.title).split("?")[0]
+            img_key = item.mainImage.split("?")[0] if item.mainImage else ""
+            if url_key and url_key in seen_urls:
+                continue
+            if img_key and img_key in seen_images:
+                continue
+            if url_key:
+                seen_urls.add(url_key)
+            if img_key:
+                seen_images.add(img_key)
+            out.append(item)
         return out

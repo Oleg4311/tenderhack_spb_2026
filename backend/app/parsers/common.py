@@ -249,9 +249,12 @@ def calculate_relevance(query: str, item_or_title: Any, characteristics: dict[st
     if not q_tokens:
         return 0.0
 
-    exact_hits = sum(1 for token in q_tokens if token in h_set or token in haystack_text)
+    # Use token-set membership only — substring check (token in text) causes false
+    # positives: "мяч" would match inside "хомачки", "включая" inside "ключ", etc.
+    exact_hits = sum(1 for token in q_tokens if token in h_set)
     token_score = exact_hits / len(q_tokens)
-    title_score = sum(1 for token in q_tokens if token in title.lower()) / len(q_tokens)
+    title_tokens = set(_tokens(title))
+    title_score = sum(1 for token in q_tokens if token in title_tokens) / len(q_tokens)
     ngram_score = _cosine(_char_ngrams(query_text), _char_ngrams(haystack_text))
 
     numbers = re.findall(r"\d+(?:/\d+)?", query_text)
@@ -265,8 +268,9 @@ def calculate_relevance(query: str, item_or_title: Any, characteristics: dict[st
 def relevance_breakdown(query: str, item: "ProductItem") -> dict[str, Any]:
     text = product_relevance_text(item).lower()
     q_tokens = _tokens(query)
-    matched = [token for token in q_tokens if token in text]
-    missing = [token for token in q_tokens if token not in text]
+    h_set = set(_tokens(text))
+    matched = [token for token in q_tokens if token in h_set]
+    missing = [token for token in q_tokens if token not in h_set]
     return {
         "matchedTokens": matched,
         "missingTokens": missing,
