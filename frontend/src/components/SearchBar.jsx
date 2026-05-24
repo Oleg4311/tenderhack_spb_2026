@@ -13,19 +13,23 @@ export default function SearchBar({ onSearch, loading }) {
   const [region, setRegion] = useState('Москва')
   const [focused, setFocused] = useState(false)
   const [suggestions, setSuggestions] = useState([])
+  const [correctedQuery, setCorrectedQuery] = useState('')
   const inputRef = useRef(null)
 
   useEffect(() => {
     if (query.trim().length < 2) {
       setSuggestions([])
+      setCorrectedQuery('')
       return undefined
     }
     const timer = setTimeout(async () => {
       try {
         const data = await fetchSuggest(query.trim())
-        setSuggestions(data)
+        setSuggestions(data.suggestions || [])
+        setCorrectedQuery(data.correctedQuery || '')
       } catch {
         setSuggestions([])
+        setCorrectedQuery('')
       }
     }, 300)
     return () => clearTimeout(timer)
@@ -42,6 +46,11 @@ export default function SearchBar({ onSearch, loading }) {
     setSuggestions([])
     onSearch({ query: value, region })
   }
+
+  const dropdownItems = [
+    ...(correctedQuery && correctedQuery !== query.trim() ? [correctedQuery] : []),
+    ...suggestions,
+  ].filter((value, index, arr) => value && arr.indexOf(value) === index)
 
   return (
     <form className={styles.form} onSubmit={handleSubmit}>
@@ -65,11 +74,14 @@ export default function SearchBar({ onSearch, loading }) {
           autoComplete="off"
         />
 
-        {focused && suggestions.length > 0 && (
+        {focused && dropdownItems.length > 0 && (
           <ul className={styles.suggestions}>
-            {suggestions.map(item => (
+            {dropdownItems.map(item => (
               <li key={item}>
                 <button type="button" onMouseDown={() => submitSuggestion(item)}>
+                  {item === correctedQuery && correctedQuery !== query.trim() && (
+                    <span className={styles.suggestionKind}>Исправить</span>
+                  )}
                   {item}
                 </button>
               </li>

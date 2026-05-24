@@ -162,10 +162,23 @@
   cursor: pointer;
   font-size: 0.875rem;
   font-family: inherit;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .suggestions button:hover {
   background: #f0f4ff;
+}
+
+.suggestionKind {
+  color: #0052CC;
+  background: #e8f0fe;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  flex-shrink: 0;
 }
 
 .examples {

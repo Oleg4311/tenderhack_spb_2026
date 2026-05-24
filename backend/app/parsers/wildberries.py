@@ -2,7 +2,7 @@ import asyncio
 import logging
 from urllib.parse import quote_plus
 
-from app.parsers.browser import fetch_rendered_html
+from app.parsers.browser import fetch_rendered_html, reset_context
 from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price
 from app.parsers.extractors import extract_characteristics_from_json, extract_dom_cards, extract_embedded_json, find_products_in_json
 from app.parsers.http_client import Fetcher, json_headers
@@ -98,68 +98,80 @@ class WildberriesParser:
         seen_ids: set[str] = set()
 
         rendered = None
-        try:
-            rendered = await asyncio.wait_for(
-                fetch_rendered_html(
-                    search_url,
-                    referer="https://www.wildberries.ru/",
-                    warmup_url="https://www.wildberries.ru/",
-                    wait_selectors=['[data-nm-id]', 'article', '.product-card', 'a[href*="/catalog/"]'],
-                    scroll_steps=4,
-                    use_proxy=False,
-                    block_assets=False,
-                ),
-                timeout=38,
+        for use_proxy in (True, True):
+            try:
+                rendered = await asyncio.wait_for(
+                    fetch_rendered_html(
+                        search_url,
+                        referer="https://www.wildberries.ru/",
+                        warmup_url="",
+                        wait_selectors=['[data-nm-id]', 'article', '.product-card', 'a[href*="/catalog/"]'],
+                        scroll_steps=2,
+                        use_proxy=use_proxy,
+                        block_assets=True,
+                    ),
+                    timeout=32,
+                )
+            except Exception as exc:
+                logger.info("[source=wb] browser_%s_failed=%s", "proxy" if use_proxy else "direct", type(exc).__name__)
+                if use_proxy:
+                    asyncio.create_task(reset_context("www.wildberries.ru", True))
+                rendered = None
+
+            if rendered and rendered.product_payloads:
+                for payload in rendered.product_payloads:
+                    products = []
+                    if isinstance(payload, dict):
+                        data_node = payload.get("data")
+                        products = (data_node.get("products") or []) if isinstance(data_node, dict) else []
+                    if not products:
+                        products = find_products_in_json(payload)
+                    for raw in products:
+                        if not isinstance(raw, dict):
+                            continue
+                        pid = str(raw.get("id") or raw.get("nmId") or "")
+                        if pid and pid in seen_ids:
+                            continue
+                        item = self._from_search_product(raw, region, category)
+                        if item:
+                            if pid:
+                                seen_ids.add(pid)
+                            items.append(item)
+                            if len(items) >= limit:
+                                break
+                    if len(items) >= limit:
+                        break
+
+            if not items and rendered and rendered.html:
+                for data in extract_embedded_json(rendered.html):
+                    for raw in find_products_in_json(data):
+                        item = self._from_search_product(raw, region, category) if isinstance(raw, dict) else None
+                        if item:
+                            items.append(item)
+                            if len(items) >= limit:
+                                break
+                    if items:
+                        break
+                if not items:
+                    for card in extract_dom_cards(rendered.html, "https://www.wildberries.ru/")[:limit]:
+                        if card.get("title") and (card.get("price") or card.get("url")):
+                            items.append(ProductItem(
+                                source=self.source, sourceType="marketplace", realSourceHost="wildberries.ru",
+                                title=card["title"], price=card["price"], url=card["url"] or search_url,
+                                mainImage=card["image"], images=[card["image"]] if card["image"] else [],
+                                rating=card["rating"], brand=card["brand"], productId=card["product_id"],
+                                category=category, region=region, geo=default_geo(region),
+                            ))
+
+            logger.info(
+                "[source=wb] browser_%s_products=%d status=%s reason=%s",
+                "proxy" if use_proxy else "direct",
+                len(items),
+                rendered.status if rendered else "none",
+                rendered.errorReason if rendered else "",
             )
-        except Exception as exc:
-            logger.info("[source=wb] browser_direct_failed=%s", type(exc).__name__)
-
-        if rendered and rendered.product_payloads:
-            for payload in rendered.product_payloads:
-                products = []
-                if isinstance(payload, dict):
-                    data_node = payload.get("data")
-                    products = (data_node.get("products") or []) if isinstance(data_node, dict) else []
-                if not products:
-                    products = find_products_in_json(payload)
-                for raw in products:
-                    if not isinstance(raw, dict):
-                        continue
-                    pid = str(raw.get("id") or raw.get("nmId") or "")
-                    if pid and pid in seen_ids:
-                        continue
-                    item = self._from_search_product(raw, region, category)
-                    if item:
-                        if pid:
-                            seen_ids.add(pid)
-                        items.append(item)
-                        if len(items) >= limit:
-                            break
-                if len(items) >= limit:
-                    break
-
-        if not items and rendered and rendered.html:
-            for data in extract_embedded_json(rendered.html):
-                for raw in find_products_in_json(data):
-                    item = self._from_search_product(raw, region, category) if isinstance(raw, dict) else None
-                    if item:
-                        items.append(item)
-                        if len(items) >= limit:
-                            break
-                if items:
-                    break
-            if not items:
-                for card in extract_dom_cards(rendered.html, "https://www.wildberries.ru/")[:limit]:
-                    if card.get("title") and (card.get("price") or card.get("url")):
-                        items.append(ProductItem(
-                            source=self.source, sourceType="marketplace", realSourceHost="wildberries.ru",
-                            title=card["title"], price=card["price"], url=card["url"] or search_url,
-                            mainImage=card["image"], images=[card["image"]] if card["image"] else [],
-                            rating=card["rating"], brand=card["brand"], productId=card["product_id"],
-                            category=category, region=region, geo=default_geo(region),
-                        ))
-
-        logger.info("[source=wb] browser_products=%d status=%s reason=%s", len(items), rendered.status if rendered else "none", rendered.errorReason if rendered else "")
+            if items:
+                break
 
         if not items:
             results = await asyncio.gather(

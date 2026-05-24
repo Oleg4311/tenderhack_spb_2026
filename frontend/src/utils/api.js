@@ -23,7 +23,13 @@ export async function searchProducts(query, region = 'Москва', limit = 10)
 export async function fetchSuggest(q) {
   const params = new URLSearchParams({ q })
   const resp = await fetch(`${BASE}/search/suggest?${params}`)
-  if (!resp.ok) return []
-  return (await resp.json()).suggestions || []
+  if (!resp.ok) return { suggestions: [] }
+  const data = await resp.json()
+  return {
+    suggestions: data.suggestions || [],
+    correctedQuery: data.correctedQuery || '',
+    normalizedQuery: data.normalizedQuery || '',
+    source: data.source || '',
+    sourcePolicy: data.sourcePolicy || '',
+  }
 }
-

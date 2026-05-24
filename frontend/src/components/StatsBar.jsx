@@ -61,4 +61,3 @@ export default function StatsBar({ results, activeSource, onSourceChange }) {
 function fmtPrice(v) {
   return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(v)
 }
-

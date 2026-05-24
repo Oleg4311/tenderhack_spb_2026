@@ -596,13 +596,19 @@ def extract_price(html: str) -> float:
             content_price = normalize_price(content_val) if content_val else 0
             text_price = normalize_price(tag.get_text(" ", strip=True))
             # Skip suspiciously large content values (Bitrix-style internal IDs in kopeks)
-            if content_price and content_price < 100_000:
+            if 20 <= content_price < 100_000:
                 return content_price
-            if text_price and text_price < 100_000:
+            if 20 <= text_price < 100_000:
                 return text_price
-            if content_price:
+            if content_price >= 20:
                 return content_price
-    return normalize_price(html[:120_000])
+    text = clean_text(html[:160_000])
+    for match in re.finditer(r"(\d[\d\s.,]{1,12})\s*(?:₽|руб\.?|rub)", text, re.I):
+        price = normalize_price(match.group(1))
+        if price >= 20:
+            return price
+    fallback = normalize_price(html[:120_000])
+    return fallback if fallback >= 20 else 0
 
 
 def extract_rating(html: str) -> tuple[float, int]:
@@ -705,6 +711,8 @@ def extract_product_from_html(html: str, url: str, source: str) -> ProductItem:
     item.url = item.url or url
     item.images = list(dict.fromkeys(item.images + extract_images(html, url)))
     item.mainImage = item.mainImage or (item.images[0] if item.images else "")
+    if item.price and item.price < 20:
+        item.price = 0
     item.price = item.price or extract_price(html)
     rating, reviews = extract_rating(html)
     item.rating = item.rating or rating

@@ -47,21 +47,25 @@ class OzonParser:
         blocked_reason = ""
 
         rendered = None
-        try:
-            rendered = await asyncio.wait_for(
-                fetch_rendered_html(
-                    search_url,
-                    referer="https://www.ozon.ru/",
-                    warmup_url="https://www.ozon.ru/",
-                    wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]', 'article', '[class*="tile" i]'],
-                    scroll_steps=5,
-                    use_proxy=False,
-                    block_assets=False,
-                ),
-                timeout=45,
-            )
-        except Exception as exc:
-            logger.info("[source=ozon] browser_direct_failed=%s", type(exc).__name__)
+        for use_proxy, timeout in ((True, 24), (False, 10)):
+            try:
+                rendered = await asyncio.wait_for(
+                    fetch_rendered_html(
+                        search_url,
+                        referer="https://www.ozon.ru/",
+                        warmup_url="",
+                        wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]', 'article', '[class*="tile" i]'],
+                        scroll_steps=1,
+                        use_proxy=use_proxy,
+                        block_assets=True,
+                    ),
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                logger.info("[source=ozon] browser_%s_failed=%s", "proxy" if use_proxy else "direct", type(exc).__name__)
+                rendered = None
+            if rendered and rendered.status != "blocked":
+                break
 
         if rendered and rendered.product_payloads:
             for payload in rendered.product_payloads:

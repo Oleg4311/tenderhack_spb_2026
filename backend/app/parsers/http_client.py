@@ -21,6 +21,7 @@ from app.parsers.common import detect_blocked_page
 logger = logging.getLogger(__name__)
 
 USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -168,12 +169,20 @@ def json_headers(referer: str = "", source: str = "") -> dict[str, str]:
 
 
 def _decode_text(content: bytes, declared_text: str) -> str:
+    """Fix cp1251 mojibake: only re-decode if the page is NOT valid UTF-8."""
     text = declared_text or ""
+    # Heuristic: mojibake shows as sequences like â€™ (= ' in cp1251-over-utf8).
+    # Guard: if content is valid UTF-8, keep the httpx/curl decoded text as-is.
     if "â" in text[:8000] or "Ã" in text[:8000]:
         try:
-            return content.decode("cp1251")
-        except Exception:
-            pass
+            content.decode("utf-8")
+            # Valid UTF-8 — the 'â'/'Ã' are legitimate characters (e.g. ñ, ü), keep as-is
+        except UnicodeDecodeError:
+            # Not valid UTF-8 — likely cp1251, try to re-decode
+            try:
+                return content.decode("cp1251")
+            except Exception:
+                pass
     return text
 
 

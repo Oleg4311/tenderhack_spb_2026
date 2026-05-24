@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from app.parsers.query_normalizer import SYNONYMS
+from app.parsers.aggregator import AggregatorParser
+from app.parsers.query_normalizer import SYNONYMS, expand_query, normalize_query
 from app.parsers.service import search_products
 
 router = APIRouter()
@@ -32,6 +33,30 @@ async def search_get(
 @router.get("/search/suggest")
 async def suggest(q: str = Query(..., min_length=1)):
     needle = q.lower().strip()
-    suggestions = [key for key in SYNONYMS if needle in key][:8]
-    return {"suggestions": suggestions}
+    normalized = normalize_query(needle)
+    expanded = expand_query(normalized)[:5]
+    local = [value for value in expanded if value and value != needle]
+    local.extend([key for key in SYNONYMS if needle in key][:5])
 
+    remote = await AggregatorParser().suggest(normalized or needle, limit=8)
+    seen = set()
+    suggestions = []
+    for value in local + remote.get("suggestions", []):
+        text = str(value).strip()
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        suggestions.append(text)
+        if len(suggestions) >= 8:
+            break
+
+    corrected = normalized if normalized and normalized != needle else ""
+    return {
+        "query": q,
+        "normalizedQuery": normalized,
+        "correctedQuery": corrected,
+        "suggestions": suggestions,
+        "source": remote.get("source", "local"),
+        "sourcePolicy": "backend web-flow only; no external API key/sdk",
+    }
