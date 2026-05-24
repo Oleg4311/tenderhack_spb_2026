@@ -1,4 +1,5 @@
 import SourceSection from './SourceSection.jsx'
+import RecommendedSection from './RecommendedSection.jsx'
 import SkeletonGrid from './SkeletonGrid.jsx'
 import styles from './ResultsSection.module.css'
 
@@ -30,8 +31,12 @@ export default function ResultsSection({ results, loading, activeSource }) {
     )
   }
 
+  const recommended = results.recommended || []
+  const showRecommended = activeSource === 'all' && recommended.length > 0
+
   return (
     <div className={styles.wrap}>
+      {showRecommended && <RecommendedSection items={recommended} />}
       {filtered.map(sourceResult => (
         <SourceSection key={sourceResult.source} data={sourceResult} />
       ))}

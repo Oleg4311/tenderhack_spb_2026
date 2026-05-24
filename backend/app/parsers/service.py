@@ -5,6 +5,7 @@ from typing import Any
 
 from app.parsers.common import SOURCE_KEYS, SourceResult, calculate_completeness, calculate_relevance, relevance_breakdown
 from app.parsers.aggregator import AggregatorParser
+from app.parsers.ml_ranker import rank_items
 from app.parsers.ozon import OzonParser
 from app.parsers.query_normalizer import detect_category_from_query, expand_query, normalize_query
 from app.parsers.runet import RunetParser, _resolve_category
@@ -223,6 +224,7 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
         all_items.extend(result.items)
 
     prices = [item.price for item in all_items if item.price]
+    recommended = rank_items(all_items, normalized)
     return {
         "query": query,
         "normalizedQuery": normalized,
@@ -230,6 +232,7 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
         "region": region,
         "category": category,
         "groups": groups,
+        "recommended": recommended,
         "summary": {
             "totalFound": len(all_items),
             "minPrice": min(prices) if prices else 0,
