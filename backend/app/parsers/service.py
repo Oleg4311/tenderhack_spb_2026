@@ -144,6 +144,70 @@ async def _run_aggregator(query: str, expanded: list[str], category: str, region
         return SourceResult(source, "error", errorReason=str(exc))
 
 
+async def _run_price_ru_augmentation(
+    target_source: str,
+    query: str,
+    expanded: list[str],
+    category: str,
+    region: str,
+    limit: int,
+) -> SourceResult:
+    started = time.perf_counter()
+    try:
+        parser = AggregatorParser()
+        result = await asyncio.wait_for(
+            parser.search(query, region=region, limit=limit, category=category), timeout=45
+        )
+        if len(result.items) < 5 and len(expanded) > 1:
+            alt_query = expanded[1]
+            try:
+                alt = await asyncio.wait_for(
+                    parser.search(alt_query, region=region, limit=limit, category=category), timeout=15
+                )
+                if alt.items:
+                    combined = result.items + [i for i in alt.items if i not in result.items]
+                    result.items = parser._dedupe(combined)
+                    result.count = len(result.items)
+                    if result.status == "empty":
+                        result.status = "ok"
+            except Exception:
+                pass
+        items = [
+            item
+            for item in result.items
+            if (item.source if item.source in SOURCE_KEYS else "runet") == target_source
+        ]
+        diagnostics = {
+            "sourceHost": "price.ru",
+            "mode": "always_on_augmentation",
+            "targetSource": target_source,
+            "priceRuStatus": result.status,
+            "priceRuErrorReason": result.errorReason,
+            "latencyMs": int((time.perf_counter() - started) * 1000),
+            "priceRuOfferGraph": result.diagnostics,
+        }
+        return SourceResult(
+            target_source,
+            "ok" if items else "empty",
+            len(items),
+            "",
+            items,
+            diagnostics=diagnostics,
+        )
+    except Exception as exc:
+        return SourceResult(
+            target_source,
+            "error",
+            errorReason=f"price.ru augmentation error: {exc}",
+            diagnostics={
+                "sourceHost": "price.ru",
+                "mode": "always_on_augmentation",
+                "targetSource": target_source,
+                "latencyMs": int((time.perf_counter() - started) * 1000),
+            },
+        )
+
+
 def _postprocess(result: SourceResult, normalized: str, limit: int) -> SourceResult:
     cleaned = []
     for item in result.items:
@@ -179,8 +243,11 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
         source: asyncio.create_task(_run_source(source, normalized, expanded, category, region, limit))
         for source in active_sources
     }
-    aggregator_task = asyncio.create_task(_run_aggregator(normalized, expanded, category, region, limit))
-    all_tasks = list(tasks.values()) + [aggregator_task]
+    price_ru_tasks = {
+        source: asyncio.create_task(_run_price_ru_augmentation(source, normalized, expanded, category, region, limit))
+        for source in active_sources
+    }
+    all_tasks = list(tasks.values()) + list(price_ru_tasks.values())
     done, pending = await asyncio.wait(all_tasks, timeout=85)
     for task in pending:
         task.cancel()
@@ -203,20 +270,33 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
         else:
             raw_by_source[source] = SourceResult(source, "error", errorReason="global timeout > 85s")
 
-    if aggregator_task in done and not aggregator_task.cancelled():
-        agg = aggregator_task.result()
-        if isinstance(agg, SourceResult):
-            for bucket in raw_by_source.values():
-                bucket.diagnostics.setdefault("priceRuOfferGraph", agg.diagnostics)
-            if agg.items:
-                for item in agg.items:
-                    target = item.source if item.source in SOURCE_KEYS else "runet"
-                    bucket = raw_by_source[target]
-                    bucket.items.append(item)
+    for source, price_task in price_ru_tasks.items():
+        bucket = raw_by_source[source]
+        if price_task in done and not price_task.cancelled():
+            price_result = price_task.result()
+            if isinstance(price_result, SourceResult):
+                bucket.diagnostics.setdefault("priceRuAugmentation", price_result.diagnostics)
+                if price_result.items:
+                    bucket.items.extend(price_result.items)
                     if bucket.status in {"blocked", "error", "empty", "skipped"}:
                         bucket.status = "ok"
                         bucket.errorReason = ""
-                    bucket.diagnostics.setdefault("aggregatorFallback", "price.ru")
+                    bucket.diagnostics["priceRuAugmentation"]["itemsAdded"] = len(price_result.items)
+            else:
+                bucket.diagnostics.setdefault(
+                    "priceRuAugmentation",
+                    {"sourceHost": "price.ru", "mode": "always_on_augmentation", "error": str(price_result)},
+                )
+        else:
+            bucket.diagnostics.setdefault(
+                "priceRuAugmentation",
+                {
+                    "sourceHost": "price.ru",
+                    "mode": "always_on_augmentation",
+                    "targetSource": source,
+                    "error": "global timeout > 85s",
+                },
+            )
     raw = [raw_by_source[source] for source in SOURCE_KEYS]
 
     groups = {}
