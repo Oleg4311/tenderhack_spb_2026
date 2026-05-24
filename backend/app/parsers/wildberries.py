@@ -3,7 +3,7 @@ import logging
 from urllib.parse import quote_plus
 
 from app.parsers.browser import fetch_rendered_html, reset_context
-from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price
+from app.parsers.common import ProductItem, SourceResult, calculate_relevance, default_geo, merge_product_data, normalize_price
 from app.parsers.extractors import extract_characteristics_from_json, extract_dom_cards, extract_embedded_json, find_products_in_json
 from app.parsers.http_client import Fetcher, json_headers
 
@@ -97,8 +97,34 @@ class WildberriesParser:
         items: list[ProductItem] = []
         seen_ids: set[str] = set()
 
+        results = await asyncio.gather(
+            _try(SEARCH_ENDPOINTS[0], False),
+            _try(SEARCH_ENDPOINTS[1], False),
+            _try(SEARCH_ENDPOINTS[0], True),
+            _try(SEARCH_ENDPOINTS[1], True),
+        )
+        for products in results:
+            for raw in products:
+                if not isinstance(raw, dict):
+                    continue
+                pid = str(raw.get("id") or "")
+                if pid and pid in seen_ids:
+                    continue
+                item = self._from_search_product(raw, region, category)
+                if item and self._is_relevant(query, item):
+                    if pid:
+                        seen_ids.add(pid)
+                    items.append(item)
+                    if len(items) >= limit:
+                        break
+            if len(items) >= limit:
+                break
+        logger.info("[source=wb] api_products=%d", len(items))
+
         rendered = None
-        for use_proxy in (True, True):
+        for use_proxy in (True, False):
+            if len(items) >= limit:
+                break
             try:
                 rendered = await asyncio.wait_for(
                     fetch_rendered_html(
@@ -133,7 +159,7 @@ class WildberriesParser:
                         if pid and pid in seen_ids:
                             continue
                         item = self._from_search_product(raw, region, category)
-                        if item:
+                        if item and self._is_relevant(query, item):
                             if pid:
                                 seen_ids.add(pid)
                             items.append(item)
@@ -146,7 +172,7 @@ class WildberriesParser:
                 for data in extract_embedded_json(rendered.html):
                     for raw in find_products_in_json(data):
                         item = self._from_search_product(raw, region, category) if isinstance(raw, dict) else None
-                        if item:
+                        if item and self._is_relevant(query, item):
                             items.append(item)
                             if len(items) >= limit:
                                 break
@@ -155,13 +181,15 @@ class WildberriesParser:
                 if not items:
                     for card in extract_dom_cards(rendered.html, "https://www.wildberries.ru/")[:limit]:
                         if card.get("title") and (card.get("price") or card.get("url")):
-                            items.append(ProductItem(
+                            item = ProductItem(
                                 source=self.source, sourceType="marketplace", realSourceHost="wildberries.ru",
                                 title=card["title"], price=card["price"], url=card["url"] or search_url,
                                 mainImage=card["image"], images=[card["image"]] if card["image"] else [],
                                 rating=card["rating"], brand=card["brand"], productId=card["product_id"],
                                 category=category, region=region, geo=default_geo(region),
-                            ))
+                            )
+                            if self._is_relevant(query, item):
+                                items.append(item)
 
             logger.info(
                 "[source=wb] browser_%s_products=%d status=%s reason=%s",
@@ -188,7 +216,7 @@ class WildberriesParser:
                     if pid and pid in seen_ids:
                         continue
                     item = self._from_search_product(raw, region, category)
-                    if item:
+                    if item and self._is_relevant(query, item):
                         if pid:
                             seen_ids.add(pid)
                         items.append(item)
@@ -212,7 +240,7 @@ class WildberriesParser:
                         detail = None
                     items[idx] = merge_product_data(item, detail)
 
-        items = items[:limit]
+        items = [item for item in items if self._is_relevant(query, item)][:limit]
         logger.info("[source=wb] relevant_products=%d", len([i for i in items if i.title and i.price]))
 
         if not items:
@@ -223,6 +251,12 @@ class WildberriesParser:
                 diagnostics={"operatorAction": "WB requires residential proxy or Russian IP"},
             )
         return SourceResult(self.source, "ok", len(items), "", items)
+
+    def _is_relevant(self, query: str, item: ProductItem) -> bool:
+        query = (query or "").strip()
+        if len(query) < 3:
+            return True
+        return calculate_relevance(query, item) >= 0.08
 
     def _from_search_product(self, p: dict, region: str, category: str) -> ProductItem | None:
         nm_id = p.get("id")

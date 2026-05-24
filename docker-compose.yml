@@ -10,7 +10,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
-      - PROXY_URL=http://znngrkle:v2nlkz3z19zm@38.154.203.95:5863
+      - PROXY_URL=http://znngrkle:v2nlkz3z19zm@64.137.96.74:6641
     networks:
       - tenderhack_net
     healthcheck:

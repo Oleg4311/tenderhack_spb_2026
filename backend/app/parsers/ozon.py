@@ -1,9 +1,10 @@
 import asyncio
 import logging
+import os
 from urllib.parse import quote_plus
 
 from app.parsers.browser import fetch_rendered_html
-from app.parsers.common import ProductItem, SourceResult, default_geo, normalize_price, normalize_url
+from app.parsers.common import ProductItem, SourceResult, calculate_relevance, default_geo, normalize_price, normalize_url
 from app.parsers.extractors import (
     extract_characteristics_from_json,
     extract_dom_cards,
@@ -100,14 +101,17 @@ class OzonParser:
         if not items and _HAS_CURL:
             for endpoint in _OZON_ENDPOINTS:
                 url = f"{endpoint}?url={quote_plus(search_path)}"
-                tasks.append(self._try_endpoint(url, _ANDROID_UA, "ozonapp_android", "chrome124", region, category, limit))
-                tasks.append(self._try_endpoint(url, _IOS_UA, "ozonapp_ios", "safari17_0", region, category, limit))
+                tasks.append(self._try_endpoint(url, _ANDROID_UA, "ozonapp_android", "chrome124", region, category, limit, query, True))
+                tasks.append(self._try_endpoint(url, _ANDROID_UA, "ozonapp_android", "chrome124", region, category, limit, query, False))
+                tasks.append(self._try_endpoint(url, _IOS_UA, "ozonapp_ios", "safari17_0", region, category, limit, query, True))
+                tasks.append(self._try_endpoint(url, _IOS_UA, "ozonapp_ios", "safari17_0", region, category, limit, query, False))
 
         # Также пробуем web-заголовки с разными TLS-профилями
         web_url = f"{_OZON_ENDPOINTS[0]}?url={quote_plus(search_path)}"
         if not items and _HAS_CURL:
             for profile in ("chrome124", "chrome120", "edge101"):
-                tasks.append(self._try_endpoint(web_url, None, "ozonweb", profile, region, category, limit))
+                tasks.append(self._try_endpoint(web_url, None, "ozonweb", profile, region, category, limit, query, True))
+                tasks.append(self._try_endpoint(web_url, None, "ozonweb", profile, region, category, limit, query, False))
 
         results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
 
@@ -148,7 +152,7 @@ class OzonParser:
             if not html:
                 blocked_reason = "Ozon: все эндпоинты вернули ошибку или блокировку"
 
-        items = self._dedupe(items)[:limit]
+        items = [item for item in self._dedupe(items) if self._is_relevant(query, item)][:limit]
         logger.info("[source=ozon] relevant_products=%d", len([i for i in items if i.title and i.price]))
 
         if not items:
@@ -173,6 +177,8 @@ class OzonParser:
         region: str,
         category: str,
         limit: int,
+        query: str,
+        use_proxy: bool,
     ) -> list[ProductItem]:
         """Один запрос к Ozon BFF с указанными заголовками и TLS-профилем."""
         try:
@@ -196,7 +202,9 @@ class OzonParser:
                     "sec-fetch-site": "same-site",
                 })
 
-            async with _CurlSession(impersonate=profile) as sess:
+            proxy = os.getenv("PROXY_URL", "").strip() if use_proxy else ""
+            proxies = {"http": proxy, "https": proxy} if proxy else None
+            async with _CurlSession(impersonate=profile, proxies=proxies) as sess:
                 resp = await asyncio.wait_for(sess.get(url, headers=headers), timeout=8)
                 if resp.status_code != 200:
                     return []
@@ -204,30 +212,33 @@ class OzonParser:
                     data = resp.json()
                 except Exception:
                     return []
-            return self._items_from_json(data, region, category, limit)
+            return [item for item in self._items_from_json(data, region, category, limit) if self._is_relevant(query, item)]
         except Exception as exc:
             logger.debug("[ozon] %s %s failed: %s", profile, app_name, exc)
             return []
 
     async def _fetch_html(self, url: str) -> str:
         """Пробуем получить HTML страницы поиска через curl_cffi."""
+        proxy_url = os.getenv("PROXY_URL", "").strip()
         for profile in ("chrome124", "chrome120", "safari17_0"):
-            try:
-                async with _CurlSession(impersonate=profile) as sess:
-                    resp = await asyncio.wait_for(
-                        sess.get(url, headers={
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                            "Accept-Language": "ru-RU,ru;q=0.9",
-                            "Accept-Encoding": "gzip",
-                            "Referer": "https://www.ozon.ru/",
-                        }),
-                        timeout=10,
-                    )
-                    if resp.status_code == 200 and len(resp.text) > 5000:
-                        return resp.text
-            except Exception:
-                pass
+            for use_proxy in (True, False):
+                try:
+                    proxies = {"http": proxy_url, "https": proxy_url} if use_proxy and proxy_url else None
+                    async with _CurlSession(impersonate=profile, proxies=proxies) as sess:
+                        resp = await asyncio.wait_for(
+                            sess.get(url, headers={
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                "Accept-Language": "ru-RU,ru;q=0.9",
+                                "Accept-Encoding": "gzip",
+                                "Referer": "https://www.ozon.ru/",
+                            }),
+                            timeout=10,
+                        )
+                        if resp.status_code == 200 and len(resp.text) > 5000:
+                            return resp.text
+                except Exception:
+                    pass
         return ""
 
     def _items_from_json(self, data, region: str, category: str, limit: int) -> list[ProductItem]:
@@ -348,3 +359,9 @@ class OzonParser:
                 seen.add(key)
                 out.append(item)
         return out
+
+    def _is_relevant(self, query: str, item: ProductItem) -> bool:
+        query = (query or "").strip()
+        if len(query) < 3:
+            return True
+        return calculate_relevance(query, item) >= 0.08
