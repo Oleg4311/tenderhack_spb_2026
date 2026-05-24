@@ -1,4 +1,3 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
 import ProductCard from './ProductCard.jsx'
 import styles from './SourceSection.module.css'
 
@@ -22,9 +21,6 @@ const EMPTY_MESSAGES = {
   empty:   'По этому запросу ничего не найдено',
   skipped: 'Не используется для этой категории',
 }
-
-const PAGE_SIZE = 4
-const LOAD_MORE = 4
 
 function fmtPrice(v) {
   return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(v)
@@ -51,35 +47,9 @@ export default function SourceSection({ data }) {
   const min    = prices.length ? Math.min(...prices) : 0
   const max    = prices.length ? Math.max(...prices) : 0
 
-  const [visible, setVisible] = useState(Math.min(PAGE_SIZE, items.length))
-  const sentinelRef = useRef(null)
-
-  useEffect(() => {
-    setVisible(Math.min(PAGE_SIZE, items.length))
-  }, [data])
-
-  const loadMore = useCallback(() => {
-    setVisible(v => Math.min(v + LOAD_MORE, items.length))
-  }, [items.length])
-
-  useEffect(() => {
-    const el = sentinelRef.current
-    if (!el) return
-    const observer = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting) loadMore() },
-      { rootMargin: '120px' }
-    )
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [loadMore])
-
-  // Hide "skipped" sections entirely — they add no value for the user
   if (data.status === 'skipped') return null
 
   const isEmpty = items.length === 0
-  const shown    = items.slice(0, visible)
-  const hasMore  = visible < items.length
-  const remaining = items.length - visible
 
   return (
     <section className={styles.section}>
@@ -112,21 +82,13 @@ export default function SourceSection({ data }) {
       {isEmpty ? (
         <EmptyState status={data.status} errorReason={data.errorReason} meta={meta} />
       ) : (
-        <>
+        <div className={styles.gridScroll}>
           <div className={styles.grid}>
-            {shown.map((item, idx) => (
+            {items.map((item, idx) => (
               <ProductCard key={`${item.url}-${idx}`} item={item} accentColor={meta.color} />
             ))}
           </div>
-
-          {hasMore && (
-            <div ref={sentinelRef} className={styles.sentinel}>
-              <button className={styles.loadMoreBtn} onClick={loadMore}>
-                Показать ещё {Math.min(LOAD_MORE, remaining)} из {remaining}
-              </button>
-            </div>
-          )}
-        </>
+        </div>
       )}
     </section>
   )

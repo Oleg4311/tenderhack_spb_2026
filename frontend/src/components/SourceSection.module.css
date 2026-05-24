@@ -84,32 +84,31 @@
   margin-left: 4px;
 }
 
+.gridScroll {
+  max-height: 680px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-radius: 4px;
+}
+
+.gridScroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.gridScroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.gridScroll::-webkit-scrollbar-thumb {
+  background: #d1d9e6;
+  border-radius: 4px;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 12px;
-}
-
-.sentinel {
-  display: flex;
-  justify-content: center;
-  padding: 16px 0 4px;
-}
-
-.loadMoreBtn {
-  background: none;
-  border: 1px solid #d1d9e6;
-  border-radius: 8px;
-  padding: 8px 20px;
-  font-size: 0.85rem;
-  color: #6b7280;
-  cursor: pointer;
-  transition: border-color 0.15s, color 0.15s;
-}
-
-.loadMoreBtn:hover {
-  border-color: #003087;
-  color: #003087;
+  padding-right: 2px;
 }
 
 .emptyState {

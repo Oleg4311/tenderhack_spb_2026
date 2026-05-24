@@ -14,6 +14,12 @@ export default function ProductCard({ item, accentColor }) {
 
   const image = item.mainImage || item.image_url || item.images?.[0]
   const link = item.url || item.product_url
+
+  function handleCardClick(e) {
+    if (!link) return
+    if (e.target.closest('button') || e.target.closest('a')) return
+    window.open(link, '_blank', 'noopener,noreferrer')
+  }
   const reviews = item.reviewsCount || item.reviews_count || 0
   const relevance = item.relevanceScore || item.relevance_score || 0
   const allChars = Object.entries(item.characteristics || {})
@@ -21,7 +27,11 @@ export default function ProductCard({ item, accentColor }) {
   const hasChars = allChars.length > 0
 
   return (
-    <article className={styles.card} style={{ '--card-accent': accentColor }}>
+    <article
+      className={styles.card}
+      style={{ '--card-accent': accentColor, cursor: link ? 'pointer' : 'default' }}
+      onClick={handleCardClick}
+    >
       <div className={styles.imgWrap}>
         {image && !imgError ? (
           <img
