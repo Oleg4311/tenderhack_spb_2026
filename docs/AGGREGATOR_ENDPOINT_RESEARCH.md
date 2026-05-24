@@ -94,3 +94,15 @@ Not allowed:
 - Session-cookie dependent private endpoints.
 - TLS pinning bypass.
 - Emulating closed mobile SDK flows as a backend data source.
+
+## Additional Internal Endpoint Pass
+
+User clarified that official/public APIs are not acceptable; the desired source is a browser/internal endpoint similar to the current `price.ru` web flow. Additional candidates checked on 2026-05-24:
+
+| source | supports_ozon | supports_wb | supports_yandex | endpoint_found | endpoint_url | method | requires_auth | returns_json | usable_for_project | notes |
+|---|---:|---:|---:|---:|---|---|---:|---:|---:|---|
+| GoodPrice.ai | yes | yes | yes | partial | `/api/v2/landing/demo`, `/api/v2/search/reserve`, `/api/v2/search/jobs/{id}/stream` | GET/POST/SSE | yes for real search | yes | no | Frontend uses internal `/api/v2` endpoints. `GET /api/v2/landing/demo` returns unauthenticated demo/trend product JSON, but it is not arbitrary search and sampled payload contained only WB products. Real search reserve/execute/stream returned `401 Not authenticated` without bearer token. |
+| Shopper extension | yes | yes | yes | partial | `https://shopper.bonbot.ru/api/poiskim/auth`, `/poiskim/shops`, `https://poisk.im/api_dev/search/` | POST | internal token | yes if backend responds | no | CRX 1.34 contains an internal flow: get poisk.im token through Shopper backend, then POST to poisk.im with `X-Poisk-Token`. In the current environment `shopper.bonbot.ru` and `poisk.im/api_dev/search` timed out; `shopper-man.ru/api/poiskim/shops` returned 404. Not reliable enough to register. |
+| Sravnuk / Fashion Expert | sometimes | yes | no | yes | `/text?search=...` with `__NEXT_DATA__` HTML payload | GET | no | embedded JSON/HTML | no | Clothing/fashion web search pages contain real Wildberries and sometimes Ozon items. It is not general-purpose for tires/office, Ozon coverage is query-dependent, and responses repeatedly timed out. It can be considered only as a clothing-only experimental fallback, not a guaranteed source. |
+
+Conclusion after the additional pass: under the current rule set (no official API, no paid API, no bearer/user session auth, no mobile SDK emulation), no newly checked source is guaranteed enough for active registration. `price.ru` remains the only stable general no-auth internal web source already integrated. `GoodPrice.ai` is technically the closest candidate if an authenticated web session becomes acceptable, but it must remain disabled while bearer/session auth is forbidden.

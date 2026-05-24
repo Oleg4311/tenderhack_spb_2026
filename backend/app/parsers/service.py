@@ -108,7 +108,7 @@ async def _run_aggregator(query: str, expanded: list[str], category: str, region
     try:
         parser = AggregatorParser()
         result = await asyncio.wait_for(
-            parser.search(query, region=region, limit=limit, category=category), timeout=25
+            parser.search(query, region=region, limit=limit, category=category), timeout=45
         )
         # If primary query returns few items, try first expanded variant in parallel
         if len(result.items) < 5 and len(expanded) > 1:
@@ -205,15 +205,18 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
 
     if aggregator_task in done and not aggregator_task.cancelled():
         agg = aggregator_task.result()
-        if isinstance(agg, SourceResult) and agg.items:
-            for item in agg.items:
-                target = item.source if item.source in SOURCE_KEYS else "runet"
-                bucket = raw_by_source[target]
-                bucket.items.append(item)
-                if bucket.status in {"blocked", "error", "empty", "skipped"}:
-                    bucket.status = "ok"
-                    bucket.errorReason = ""
-                bucket.diagnostics.setdefault("aggregatorFallback", "price.ru")
+        if isinstance(agg, SourceResult):
+            for bucket in raw_by_source.values():
+                bucket.diagnostics.setdefault("priceRuOfferGraph", agg.diagnostics)
+            if agg.items:
+                for item in agg.items:
+                    target = item.source if item.source in SOURCE_KEYS else "runet"
+                    bucket = raw_by_source[target]
+                    bucket.items.append(item)
+                    if bucket.status in {"blocked", "error", "empty", "skipped"}:
+                        bucket.status = "ok"
+                        bucket.errorReason = ""
+                    bucket.diagnostics.setdefault("aggregatorFallback", "price.ru")
     raw = [raw_by_source[source] for source in SOURCE_KEYS]
 
     groups = {}
