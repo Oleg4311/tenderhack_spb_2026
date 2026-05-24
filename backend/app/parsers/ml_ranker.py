@@ -1,6 +1,13 @@
 """
 ML ranking — scores and sorts ProductItem objects by relevance.
 Adapts the logic from ml.py to work with the project's ProductItem dataclass.
+
+Веса вычисляются динамически по количеству ключевых слов запроса:
+    weight_param            = 1 / (num_keywords + 3)
+    WEIGHT_PRICE            = weight_param * 2
+    WEIGHT_DISTANCE         = weight_param * 2
+    WEIGHT_TEXT_SIMILARITY  = weight_param * 2
+    WEIGHT_OTHER_PARAMS     = 1 - WEIGHT_PRICE - WEIGHT_DISTANCE - WEIGHT_TEXT_SIMILARITY
 """
 from __future__ import annotations
 import re
@@ -9,11 +16,6 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.parsers.common import ProductItem
-
-WEIGHT_PRICE = 0.20
-WEIGHT_TEXT_SIMILARITY = 0.20
-WEIGHT_KEYWORD = 0.40
-WEIGHT_COMPLETENESS = 0.20
 
 
 def _keywords(query: str) -> list[str]:
@@ -72,25 +74,31 @@ def rank_items(all_items: list["ProductItem"], query: str) -> list[dict[str, Any
         return []
 
     kws = _keywords(query)
+    num_kw = len(kws)
+
+    weight_param   = 1.0 / (num_kw + 3)
+    w_price        = weight_param * 2
+    w_distance     = weight_param * 2
+    w_text         = weight_param * 2
+    w_keyword      = max(0.0, 1.0 - w_price - w_distance - w_text)
+
     all_prices = [d["price"] for d in dicts if d.get("price")]
 
     for d in dicts:
-        price_s = _price_score(d.get("price", 0), all_prices)
-        item_text = _item_searchable_text(d)
-        text_s = _text_sim(item_text, query)
-        kw_s = _keyword_score(item_text, kws)
+        price_s    = _price_score(d.get("price", 0), all_prices)
+        distance_s = 0.5  # нет данных о расстоянии — нейтральное значение
+        item_text  = _item_searchable_text(d)
+        text_s     = _text_sim(item_text, query)
+        kw_s       = _keyword_score(item_text, kws)
 
-        # Blend with backend's own relevanceScore — it's a strong ngram/token signal
-        existing = float(d.get("relevanceScore") or d.get("relevance_score") or 0.0)
+        existing     = float(d.get("relevanceScore") or d.get("relevance_score") or 0.0)
         blended_text = (text_s + existing) / 2 if existing else text_s
 
-        completeness = float(d.get("completenessScore") or d.get("completeness_score") or 0.0)
-
         d["mlScore"] = round(
-            WEIGHT_PRICE * price_s
-            + WEIGHT_TEXT_SIMILARITY * blended_text
-            + WEIGHT_KEYWORD * kw_s
-            + WEIGHT_COMPLETENESS * completeness,
+            w_price    * price_s
+            + w_distance * distance_s
+            + w_text     * blended_text
+            + w_keyword  * kw_s,
             4,
         )
 
